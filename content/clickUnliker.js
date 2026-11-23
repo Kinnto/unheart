@@ -91,7 +91,11 @@ export function createClickUnliker({
     }
   }
 
-  async function unlike(item) {
+  // id -> { toastBefore, clickedAt }, recorded at click time so that each
+  // in-flight verification judges error toasts against its own baseline.
+  const clicked = new Map();
+
+  async function click(item) {
     const post = sel.findPost(item.id, doc);
     const button = post && sel.likedButtonOf(post.article);
     if (!button) return 'failed';
@@ -99,7 +103,20 @@ export function createClickUnliker({
     button.scrollIntoView?.({ block: 'center' });
     if (!shouldContinue()) throw new CancelledError();
     button.click();
-    const start = now();
+    clicked.set(item.id, { toastBefore, clickedAt: now() });
+    return 'clicked';
+  }
+
+  async function unlike(item) {
+    if ((await click(item)) !== 'clicked') return 'failed';
+    return verify(item);
+  }
+
+  async function verify(item) {
+    const record = clicked.get(item.id);
+    if (!record) return 'failed';
+    clicked.delete(item.id);
+    const { toastBefore, clickedAt: start } = record;
     let flippedAt = null;
     while (now() - start < VERIFY_TOTAL_MS) {
       await sleep(VERIFY_STEP_MS);
@@ -133,5 +150,5 @@ export function createClickUnliker({
 
   const succeededIds = () => [...succeeded];
 
-  return { next, unlike, requeue, restart, succeededIds };
+  return { next, click, verify, unlike, requeue, restart, succeededIds };
 }

@@ -174,3 +174,63 @@ test('succeededIds lists ids after successful unlikes', async () => {
   assert.equal(await unliker.unlike(await unliker.next()), 'ok');
   assert.deepEqual(unliker.succeededIds(), ['1']);
 });
+
+test('click clicks the heart and returns clicked; verify then returns ok', async () => {
+  const { doc, unliker } = setup([{ id: '1' }]);
+  let clicks = 0;
+  heart(doc, '1').addEventListener('click', () => { clicks++; });
+  flipOnClick(doc, '1');
+  const item = await unliker.next();
+  assert.equal(await unliker.click(item), 'clicked');
+  assert.equal(clicks, 1);
+  assert.equal(await unliker.verify(item), 'ok');
+  assert.deepEqual(unliker.succeededIds(), ['1']);
+});
+
+test('click returns failed when the post or its heart is gone, and verify of it is failed', async () => {
+  const { unliker } = setup([]);
+  const item = { id: '404', reverted: false };
+  assert.equal(await unliker.click(item), 'failed');
+  assert.equal(await unliker.verify(item), 'failed');
+});
+
+test('click rejects with CancelledError without clicking when shouldContinue is false', async () => {
+  let go = true;
+  const { doc, unliker } = setup([{ id: '1' }], { shouldContinue: () => go });
+  let clicks = 0;
+  heart(doc, '1').addEventListener('click', () => { clicks++; });
+  const item = await unliker.next();
+  go = false;
+  await assert.rejects(unliker.click(item), CancelledError);
+  assert.equal(clicks, 0);
+});
+
+test('several items can be clicked before any is verified', async () => {
+  const { doc, unliker } = setup([{ id: '1' }, { id: '2' }, { id: '3' }]);
+  for (const id of ['1', '2', '3']) flipOnClick(doc, id);
+  const items = [await unliker.next(), await unliker.next(), await unliker.next()];
+  for (const item of items) assert.equal(await unliker.click(item), 'clicked');
+  assert.deepEqual(await Promise.all(items.map((item) => unliker.verify(item))), ['ok', 'ok', 'ok']);
+});
+
+test('the toast baseline is taken at click time, per item', async () => {
+  const { doc, unliker } = setup([{ id: '1' }, { id: '2' }]);
+  flipOnClick(doc, '1');
+  flipOnClick(doc, '2');
+  const first = await unliker.next();
+  const second = await unliker.next();
+  assert.equal(await unliker.click(first), 'clicked');
+  showToast(doc, 'Something went wrong. Try reloading.');
+  assert.equal(await unliker.click(second), 'clicked');
+  const results = await Promise.all([unliker.verify(first), unliker.verify(second)]);
+  assert.deepEqual(results, ['rate-limited', 'ok']);
+});
+
+test('verify times its 3 s flip timeout from the click, not from the verify call', async () => {
+  const { unliker, clock } = setup([{ id: '1' }]);
+  const item = await unliker.next();
+  await unliker.click(item);
+  clock.t += 3000;
+  assert.equal(await unliker.verify(item), 'failed');
+  assert.ok(clock.t <= 3200, `verify kept polling until ${clock.t}`);
+});

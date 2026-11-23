@@ -8,6 +8,13 @@ function countdown(ms) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
+function took(state) {
+  if (state.finishedAt == null || state.startedAt == null) return '';
+  const ms = state.finishedAt - state.startedAt;
+  if (ms < 60_000) return ' in under a minute';
+  return ` in ${Math.max(1, Math.round(ms / 60_000))} min`;
+}
+
 function rate(state, now) {
   const minutes = (now - state.startedAt) / 60_000;
   const done = state.removed - state.removedAtStart;
@@ -52,11 +59,14 @@ export function view(state, { now, confirming = null, resumable = null }) {
       if (state.removed === 0 && state.failed === 0) {
         return { badge, lines: [line('You have no likes to remove.')], actions: [] };
       }
-      const lines = [line(`Done — ${likes(state.removed)} removed.`, 'big')];
+      const lines = [line(`Done — ${likes(state.removed)} removed${took(state)}.`, 'big')];
       const actions = [];
       if (state.failed > 0) {
         lines.push(line(`${fmt(state.failed)} didn't stick.`));
         actions.push(action('retry', 'Retry them', 'primary'));
+      }
+      if (state.slowdowns > 0) {
+        lines.push(line(`X slowed us down ${fmt(state.slowdowns)} ${state.slowdowns === 1 ? 'time' : 'times'}.`, 'muted'));
       }
       if (state.endReason === 'limit') {
         actions.push(action('start-all', 'Unlike the rest', state.failed > 0 ? 'secondary' : 'primary'));

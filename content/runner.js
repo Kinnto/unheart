@@ -1,6 +1,7 @@
-import { createPacer, onResult, nextWait } from './pacer.js';
+import { createPacer, onResult, nextWait, waited } from './pacer.js';
 
 const ACTIVE = new Set(['running', 'paused', 'backing-off']);
+export const MAX_IN_FLIGHT = 3;
 
 export function createRunner({ unliker, sleep, now = Date.now, random = Math.random }) {
   const listeners = new Set();
@@ -11,6 +12,8 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
     limit: Infinity,
     removedAtStart: 0,
     startedAt: null,
+    finishedAt: null,
+    slowdowns: 0,
     pauseReason: null,
     waitUntil: null,
     waitKind: null,
@@ -51,50 +54,101 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
     return true;
   }
 
-  const reachedLimit = () => state.removed - state.removedAtStart >= state.limit;
-  const finish = (endReason) => set({ status: 'done', endReason, waitUntil: null, waitKind: null });
+  function takeWait() {
+    const wait = nextWait(pacer, random);
+    pacer = waited(pacer);
+    return wait;
+  }
+
+  const finish = (endReason) => set({ status: 'done', endReason, finishedAt: now(), waitUntil: null, waitKind: null });
 
   async function loop(id) {
+    // Verifications started by this run that have not settled yet.
+    const pending = new Set();
+    let limited = false;
+    let failure = null;
+    const live = () => id === runId && ACTIVE.has(state.status);
+    const requeue = (item) => { if (item && !item.giveUp && !item.loadLimited) unliker.requeue(item); };
+
+    // A settled verification always counts a real 'ok'; anything else only
+    // matters while this run is still the live one.
+    function settle(item, result) {
+      if (result === 'ok') set({ removed: state.removed + 1 });
+      if (result === 'rate-limited') unliker.requeue(item);
+      if (!live()) return;
+      if (result === 'rate-limited') {
+        limited = true;
+        return;
+      }
+      pacer = onResult(pacer, result, now());
+      if (result === 'failed') set({ failed: state.failed + 1 });
+    }
+
+    function track(item) {
+      const settled = (async () => unliker.verify(item))()
+        .then((result) => settle(item, result), (error) => { failure ??= error; })
+        .finally(() => pending.delete(settled));
+      pending.add(settled);
+    }
+
+    async function drain() {
+      while (pending.size) await Promise.all(pending);
+      if (failure) throw failure;
+    }
+
+    async function backOff() {
+      await drain();
+      if (!(await checkpoint(id))) return false;
+      limited = false;
+      pacer = onResult(pacer, 'rate-limited', now());
+      set({ slowdowns: state.slowdowns + 1 });
+      const wait = takeWait();
+      return waitFor(id, wait.ms, wait.kind);
+    }
+
+    const atLimit = () => state.removed - state.removedAtStart + pending.size >= state.limit;
+
     try {
       while (await checkpoint(id)) {
-        if (reachedLimit()) return finish('limit');
+        if (failure) throw failure;
+        if (limited) {
+          if (!(await backOff())) return;
+          continue;
+        }
+        if (atLimit() && !pending.size) return finish('limit');
+        if (atLimit() || pending.size >= MAX_IN_FLIGHT) {
+          await Promise.race(pending);
+          continue;
+        }
         const pausesBefore = pauses;
         const item = await unliker.next();
-        if (id !== runId) {
-          if (item && !item.giveUp && !item.loadLimited) unliker.requeue(item);
-          return;
-        }
+        if (id !== runId) return requeue(item);
         if (item?.reverted) {
           set({ removed: state.removed - 1, failed: state.failed + (item.giveUp ? 1 : 0) });
         }
-        if (!(await checkpoint(id))) {
-          if (item && !item.giveUp && !item.loadLimited) unliker.requeue(item);
-          return;
-        }
-        if (pauses !== pausesBefore) {
-          if (item && !item.giveUp && !item.loadLimited) unliker.requeue(item);
+        if (!(await checkpoint(id))) return requeue(item);
+        if (pauses !== pausesBefore || limited) {
+          requeue(item);
           continue;
         }
         if (item?.loadLimited) {
-          pacer = onResult(pacer, 'rate-limited');
-          const wait = nextWait(pacer, random);
-          if (!(await waitFor(id, wait.ms, wait.kind))) return;
+          limited = true;
           continue;
         }
-        if (!item) return finish('end');
-        if (item.giveUp) continue;
-        const result = await unliker.unlike(item);
-        if (id !== runId) {
-          if (result === 'ok') set({ removed: state.removed + 1 });
-          return;
+        if (!item) {
+          await drain();
+          if (!limited && (await checkpoint(id))) return finish('end');
+          continue;
         }
-        pacer = onResult(pacer, result);
-        if (result === 'ok') set({ removed: state.removed + 1 });
-        else if (result === 'failed') set({ failed: state.failed + 1 });
-        else unliker.requeue(item);
-        if (state.status === 'stopped') return;
-        if (reachedLimit()) return finish('limit');
-        const wait = nextWait(pacer, random);
+        if (item.giveUp) continue;
+        if ((await unliker.click(item)) === 'clicked') {
+          track(item);
+        } else if (live()) {
+          pacer = onResult(pacer, 'failed', now());
+          set({ failed: state.failed + 1 });
+        }
+        if (!live()) return;
+        const wait = takeWait();
         if (!(await waitFor(id, wait.ms, wait.kind))) return;
       }
     } catch (error) {
@@ -105,6 +159,10 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
         waitUntil: null,
         waitKind: null,
       });
+    } finally {
+      // Whatever ended the loop, let clicks already made finish verifying so
+      // the run settles with its final count. Settled promises never reject.
+      while (pending.size) await Promise.all(pending);
     }
   }
 
@@ -118,6 +176,8 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
       removedAtStart: removed,
       failed: 0,
       startedAt: now(),
+      finishedAt: null,
+      slowdowns: 0,
       pauseReason: null,
       waitUntil: null,
       waitKind: null,

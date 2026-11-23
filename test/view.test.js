@@ -4,7 +4,7 @@ import { view } from '../content/view.js';
 
 const base = {
   status: 'idle', removed: 0, failed: 0, limit: Infinity, removedAtStart: 0, startedAt: 0,
-  pauseReason: null, waitUntil: null, waitKind: null, endReason: null, error: null,
+  finishedAt: null, slowdowns: 0, pauseReason: null, waitUntil: null, waitKind: null, endReason: null, error: null,
 };
 const ids = (vm) => vm.actions.map((a) => a.id);
 const texts = (vm) => vm.lines.map((l) => l.text);
@@ -87,6 +87,30 @@ test('stopped offers Continue', () => {
   const vm = view({ ...base, status: 'stopped', removed: 5 }, { now: 0 });
   assert.deepEqual(texts(vm), ['Stopped — 5 likes removed.']);
   assert.deepEqual(ids(vm), ['start-all']);
+});
+
+const finished = (patch) => view({ ...base, status: 'done', endReason: 'end', startedAt: 1_000, ...patch }, { now: 0 });
+
+test('done says how long the run took', () => {
+  assert.equal(texts(finished({ removed: 1284, finishedAt: 1_000 + 14 * 60_000 + 20_000 }))[0], 'Done — 1,284 likes removed in 14 min.');
+  assert.equal(texts(finished({ removed: 40, finishedAt: 1_000 + 89_000 }))[0], 'Done — 40 likes removed in 1 min.');
+  assert.equal(texts(finished({ removed: 3, finishedAt: 1_000 + 59_000 }))[0], 'Done — 3 likes removed in under a minute.');
+  assert.equal(texts(finished({ removed: 1, finishedAt: 1_000 + 61_000 }))[0], 'Done — 1 like removed in 1 min.');
+});
+
+test('done mentions X slowdowns only when there were any', () => {
+  const none = finished({ removed: 50, finishedAt: 120_000, slowdowns: 0 });
+  assert.ok(!texts(none).some((t) => /slowed/.test(t)));
+  const once = finished({ removed: 50, finishedAt: 120_000, slowdowns: 1 });
+  assert.ok(once.lines.some((l) => l.text === 'X slowed us down 1 time.' && l.kind === 'muted'));
+  const twice = finished({ removed: 50, finishedAt: 120_000, slowdowns: 2, failed: 3 });
+  assert.deepEqual(texts(twice), [
+    'Done — 50 likes removed in 2 min.',
+    "3 didn't stick.",
+    'X slowed us down 2 times.',
+    'X may hide some older likes. Reload the page and run again to catch them.',
+  ]);
+  assert.deepEqual(ids(twice), ['retry', 'share']);
 });
 
 test('error states', () => {

@@ -15,6 +15,9 @@ let runner = null;
 let ticker = null;
 let ctx = { confirmed: false, confirming: null, resumable: null };
 let lastSaved = null;
+let lastSavedAt = 0;
+let saveTimer = null;
+const SAVE_EVERY_MS = 3000;
 const MAX_SAVED_IDS = 5000;
 let unliker = null;
 let lastKey = null;
@@ -25,13 +28,34 @@ function render() {
   panel.render(view(runner.state, { now: Date.now(), confirming: ctx.confirming, resumable: ctx.resumable }));
 }
 
+function save(state) {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  lastSaved = state.removed;
+  lastSavedAt = Date.now();
+  store.set({ progress: { removed: state.removed, ids: unliker.succeededIds().slice(-MAX_SAVED_IDS) } });
+}
+
+// While running, write progress at most every SAVE_EVERY_MS, with a trailing
+// write for the last change; pauses and back-offs save straight away.
 function persist(state) {
-  if (ACTIVE.has(state.status) && state.removed !== lastSaved) {
-    lastSaved = state.removed;
-    store.set({ progress: { removed: state.removed, ids: unliker.succeededIds().slice(-MAX_SAVED_IDS) } });
-  } else if (state.status === 'done') {
+  if (state.status === 'done') {
+    clearTimeout(saveTimer);
+    saveTimer = null;
     lastSaved = null;
     store.set({ progress: null });
+    return;
+  }
+  if (!ACTIVE.has(state.status) || state.removed === lastSaved) return;
+  const wait = lastSavedAt + SAVE_EVERY_MS - Date.now();
+  if (state.status !== 'running' || wait <= 0) {
+    save(state);
+  } else {
+    saveTimer ??= setTimeout(() => {
+      saveTimer = null;
+      const latest = runner?.state;
+      if (latest && ACTIVE.has(latest.status) && latest.removed !== lastSaved) save(latest);
+    }, wait);
   }
 }
 
@@ -74,6 +98,8 @@ function onAction(id) {
       break;
     case 'stop':
       runner.stop();
+      clearTimeout(saveTimer);
+      saveTimer = null;
       lastSaved = null;
       store.set({ progress: null });
       break;
@@ -113,6 +139,7 @@ function unmountPanel() {
   panel.destroy();
   panel = null;
   const leaving = runner;
+  if (ACTIVE.has(leaving.state.status) && leaving.state.removed !== lastSaved) save(leaving.state);
   runner = null;
   leaving.stop();
 }

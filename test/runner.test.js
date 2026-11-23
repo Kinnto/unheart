@@ -7,12 +7,16 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 function fakeUnliker(entries, script = {}) {
   const queue = entries.map((e) => (typeof e === 'string' ? { id: e, reverted: false } : e));
   const u = {
+    queue,
     calls: [],
     restarted: 0,
     onRestart: () => {},
     async next() { return queue.shift() ?? null; },
-    async unlike(item) {
+    async click(item) {
       u.calls.push(item.id);
+      return 'clicked';
+    },
+    async verify(item) {
       const r = script[item.id];
       return typeof r === 'function' ? r(u.calls.length) : (r ?? 'ok');
     },
@@ -23,10 +27,29 @@ function fakeUnliker(entries, script = {}) {
   return u;
 }
 
+// Verifications for the given ids stay pending until resolve(id, result).
+function manualVerify(u, ids) {
+  const waiting = new Map();
+  const auto = u.verify;
+  u.verify = (item) => (ids.includes(item.id) && !waiting.has(item.id)
+    ? new Promise((resolve) => waiting.set(item.id, resolve))
+    : auto(item));
+  return {
+    pending: () => [...waiting.keys()],
+    resolve(id, result) {
+      const resolve = waiting.get(id);
+      assert.ok(resolve, `no pending verification for ${id}`);
+      waiting.delete(id);
+      ids = ids.filter((x) => x !== id);
+      resolve(result);
+    },
+  };
+}
+
 function harness(unliker, { neverWakeLongSleeps = false } = {}) {
   const clock = { t: 0 };
   const sleep = (ms) => {
-    if (neverWakeLongSleeps && ms >= 60_000) return new Promise(() => {});
+    if (neverWakeLongSleeps && ms >= 30_000) return new Promise(() => {});
     clock.t += ms;
     return Promise.resolve();
   };
@@ -38,12 +61,14 @@ function harness(unliker, { neverWakeLongSleeps = false } = {}) {
 
 test('unlikes everything then finishes with endReason end', async () => {
   const u = fakeUnliker(['a', 'b', 'c']);
-  const { runner } = harness(u);
+  const { runner, clock } = harness(u);
   await runner.start();
   assert.deepEqual(u.calls, ['a', 'b', 'c']);
   assert.equal(runner.state.status, 'done');
   assert.equal(runner.state.endReason, 'end');
   assert.equal(runner.state.removed, 3);
+  assert.equal(runner.state.slowdowns, 0);
+  assert.equal(runner.state.finishedAt, clock.t);
 });
 
 test('respects the limit', async () => {
@@ -70,14 +95,15 @@ test('failed results are counted separately', async () => {
   assert.equal(runner.state.failed, 1);
 });
 
-test('rate-limited requeues the item and backs off for 2 minutes', async () => {
+test('rate-limited requeues the item and backs off for 30 seconds', async () => {
   const u = fakeUnliker(['a', 'b', 'c'], { b: (n) => (n === 2 ? 'rate-limited' : 'ok') });
   const { runner, clock, statuses } = harness(u);
   await runner.start();
   assert.deepEqual(u.calls, ['a', 'b', 'b', 'c']);
   assert.equal(runner.state.removed, 3);
   assert.ok(statuses.includes('backing-off'));
-  assert.ok(clock.t >= 120_000);
+  assert.ok(clock.t >= 30_000);
+  assert.equal(runner.state.slowdowns, 1);
 });
 
 test('reverted items are subtracted; given-up items count as failed', async () => {
@@ -120,7 +146,7 @@ test('resumeNow skips the back-off wait', async () => {
   await tick();
   assert.equal(runner.state.status, 'backing-off');
   assert.equal(runner.state.waitKind, 'backoff');
-  assert.equal(runner.state.waitUntil, clock.t + 120_000);
+  assert.equal(runner.state.waitUntil, clock.t + 30_000);
   runner.resumeNow();
   await done;
   assert.equal(runner.state.removed, 1);
@@ -201,26 +227,19 @@ test('start is ignored while a run is active', async () => {
 });
 
 test('a stopped run does not interfere after a new run starts', async () => {
-  let release;
-  let runner;
-  const u = fakeUnliker(['a', 'b', 'c'], { b: () => { runner.pause('user'); return 'ok'; } });
-  const original = u.unlike;
-  u.unlike = (item) => (item.id === 'a'
-    ? new Promise((resolve) => { u.calls.push('a'); release = resolve; })
-    : original(item));
-  ({ runner } = harness(u));
-  runner.start();
+  const u = fakeUnliker(['a']);
+  const verifies = manualVerify(u, ['a']);
+  const { runner } = harness(u);
+  const first = runner.start();
   await tick();
+  assert.deepEqual(u.calls, ['a']);
   runner.stop();
+  u.queue.push({ id: 'b', reverted: false }, { id: 'c', reverted: false });
   const second = runner.start();
-  await tick();
-  release('ok');
-  await tick();
-  runner.resume();
-  await Promise.race([
-    second,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('second run stranded')), 500)),
-  ]);
+  await second;
+  assert.equal(runner.state.status, 'done');
+  verifies.resolve('a', 'ok');
+  await first;
   assert.deepEqual(u.calls, ['a', 'b', 'c']);
   assert.equal(runner.state.removed, 3);
   assert.equal(runner.state.status, 'done');
@@ -252,24 +271,25 @@ test('loadLimited from next() backs off like a rate limit, then the run complete
   const { runner, clock, statuses } = harness(u);
   await runner.start();
   assert.ok(statuses.includes('backing-off'));
-  assert.ok(clock.t >= 120_000);
+  assert.ok(clock.t >= 30_000);
+  assert.equal(runner.state.slowdowns, 1);
   assert.deepEqual(u.calls, ['a', 'b']);
   assert.equal(runner.state.removed, 2);
   assert.equal(runner.state.status, 'done');
 });
 
-test('pacing memory survives stop and start: the second back-off is 4 minutes', async () => {
+test('pacing memory survives stop and start: a second limit soon after is a 2 minute back-off', async () => {
   const u = fakeUnliker(['a'], { a: () => 'rate-limited' });
   const { runner, clock } = harness(u, { neverWakeLongSleeps: true });
   runner.start();
   await tick();
-  assert.equal(runner.state.waitUntil - clock.t, 120_000);
+  assert.equal(runner.state.waitUntil - clock.t, 30_000);
   runner.stop();
   await tick();
   runner.start();
   await tick();
   assert.equal(runner.state.status, 'backing-off');
-  assert.equal(runner.state.waitUntil - clock.t, 240_000);
+  assert.equal(runner.state.waitUntil - clock.t, 120_000);
   runner.stop();
 });
 
@@ -280,4 +300,211 @@ test('a loadLimited marker is never requeued when the run is stopped', async () 
   ({ runner } = harness(u));
   await runner.start();
   assert.deepEqual(u.requeued, [undefined].slice(1));
+});
+
+test('pipelining: the next heart is clicked before the previous verification settles', async () => {
+  const u = fakeUnliker(['a', 'b']);
+  const verifies = manualVerify(u, ['a', 'b']);
+  const { runner } = harness(u);
+  const done = runner.start();
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b']);
+  assert.deepEqual(verifies.pending(), ['a', 'b']);
+  assert.equal(runner.state.removed, 0);
+  verifies.resolve('a', 'ok');
+  verifies.resolve('b', 'ok');
+  await done;
+  assert.equal(runner.state.removed, 2);
+});
+
+test('at most 3 verifications are in flight; a settled one makes room for the next click', async () => {
+  const ids = ['a', 'b', 'c', 'd', 'e'];
+  const u = fakeUnliker(ids);
+  const verifies = manualVerify(u, ids);
+  const { runner } = harness(u);
+  const done = runner.start();
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c']);
+  verifies.resolve('b', 'ok');
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c', 'd']);
+  assert.equal(runner.state.removed, 1);
+  for (const id of ['a', 'c', 'd']) verifies.resolve(id, 'ok');
+  await tick();
+  verifies.resolve('e', 'ok');
+  await done;
+  assert.equal(runner.state.removed, 5);
+  assert.equal(runner.state.status, 'done');
+});
+
+test('a rate-limited verification stops clicking, drains the rest, then backs off', async () => {
+  const ids = ['a', 'b', 'c', 'd'];
+  const u = fakeUnliker(ids);
+  const verifies = manualVerify(u, ids);
+  const { runner } = harness(u, { neverWakeLongSleeps: true });
+  const done = runner.start();
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c']);
+  verifies.resolve('b', 'rate-limited');
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c'], 'no click after a rate limit');
+  assert.equal(runner.state.status, 'running', 'drains before backing off');
+  verifies.resolve('a', 'ok');
+  await tick();
+  assert.equal(runner.state.status, 'running');
+  verifies.resolve('c', 'failed');
+  await tick();
+  assert.equal(runner.state.status, 'backing-off');
+  assert.equal(runner.state.removed, 1);
+  assert.equal(runner.state.failed, 1);
+  assert.equal(runner.state.slowdowns, 1);
+  assert.deepEqual(u.requeued, ['b']);
+  assert.deepEqual(u.calls, ['a', 'b', 'c']);
+  runner.resumeNow();
+  await tick();
+  verifies.resolve('d', 'ok');
+  await done;
+  assert.deepEqual(u.calls, ['a', 'b', 'c', 'b', 'd']);
+  assert.equal(runner.state.removed, 3);
+});
+
+test('two rate limits in the same drain take a single short back-off', async () => {
+  const u = fakeUnliker(['a', 'b', 'c']);
+  const verifies = manualVerify(u, ['a', 'b', 'c']);
+  const { runner, clock } = harness(u, { neverWakeLongSleeps: true });
+  runner.start();
+  await tick();
+  verifies.resolve('a', 'rate-limited');
+  verifies.resolve('b', 'rate-limited');
+  verifies.resolve('c', 'ok');
+  await tick();
+  assert.equal(runner.state.status, 'backing-off');
+  assert.equal(runner.state.waitUntil - clock.t, 30_000);
+  assert.equal(runner.state.slowdowns, 1);
+  runner.stop();
+});
+
+test('the limit counts in-flight unlikes: never over-clicks, refills after a failure', async () => {
+  const ids = ['a', 'b', 'c', 'd', 'e'];
+  const u = fakeUnliker(ids);
+  const verifies = manualVerify(u, ids);
+  const { runner } = harness(u);
+  const done = runner.start({ limit: 2 });
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b']);
+  verifies.resolve('a', 'failed');
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c']);
+  verifies.resolve('b', 'ok');
+  await tick();
+  assert.equal(runner.state.status, 'running', 'waits for c before finishing');
+  verifies.resolve('c', 'ok');
+  await done;
+  assert.deepEqual(u.calls, ['a', 'b', 'c']);
+  assert.equal(runner.state.removed, 2);
+  assert.equal(runner.state.endReason, 'limit');
+});
+
+test('stop with pending verifications: their ok still counts, nothing else happens', async () => {
+  const ids = ['a', 'b', 'c', 'd'];
+  const u = fakeUnliker(ids);
+  const verifies = manualVerify(u, ids);
+  const { runner, statuses } = harness(u);
+  const done = runner.start();
+  await tick();
+  runner.stop();
+  verifies.resolve('a', 'ok');
+  verifies.resolve('b', 'rate-limited');
+  verifies.resolve('c', 'ok');
+  await done;
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c']);
+  assert.equal(runner.state.status, 'stopped');
+  assert.equal(runner.state.removed, 2);
+  assert.equal(runner.state.slowdowns, 0);
+  assert.ok(!statuses.includes('backing-off'));
+});
+
+test('pause with pending verifications: counts update while paused, no new clicks until resume', async () => {
+  const ids = ['a', 'b', 'c', 'd'];
+  const u = fakeUnliker(ids);
+  const verifies = manualVerify(u, ids);
+  const { runner } = harness(u);
+  const done = runner.start();
+  await tick();
+  runner.pause('hidden');
+  verifies.resolve('a', 'ok');
+  verifies.resolve('b', 'ok');
+  await tick();
+  assert.equal(runner.state.status, 'paused');
+  assert.equal(runner.state.removed, 2);
+  assert.deepEqual(u.calls, ['a', 'b', 'c']);
+  runner.resume();
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c', 'd']);
+  verifies.resolve('c', 'ok');
+  verifies.resolve('d', 'ok');
+  await done;
+  assert.equal(runner.state.removed, 4);
+});
+
+test('the run finishes only after every pending verification has settled', async () => {
+  const u = fakeUnliker(['a', 'b']);
+  const verifies = manualVerify(u, ['a', 'b']);
+  const { runner } = harness(u);
+  let finished = false;
+  const done = runner.start().then(() => { finished = true; });
+  await tick();
+  verifies.resolve('a', 'ok');
+  await tick();
+  assert.equal(runner.state.status, 'running');
+  assert.equal(finished, false);
+  verifies.resolve('b', 'ok');
+  await done;
+  assert.equal(runner.state.status, 'done');
+  assert.equal(runner.state.removed, 2);
+});
+
+test('a heart that vanished before the click counts as failed without verifying', async () => {
+  const u = fakeUnliker(['a', 'b']);
+  u.click = async (item) => { u.calls.push(item.id); return item.id === 'a' ? 'failed' : 'clicked'; };
+  const verified = [];
+  const verify = u.verify;
+  u.verify = (item) => { verified.push(item.id); return verify(item); };
+  const { runner } = harness(u);
+  await runner.start();
+  assert.deepEqual(verified, ['b']);
+  assert.equal(runner.state.failed, 1);
+  assert.equal(runner.state.removed, 1);
+});
+
+test('a CancelledError from click stops clicking; a pending ok still counts', async () => {
+  const u = fakeUnliker(['a', 'b']);
+  const verifies = manualVerify(u, ['a']);
+  const click = u.click;
+  u.click = async (item) => {
+    if (item.id === 'b') { const e = new Error('c'); e.name = 'CancelledError'; throw e; }
+    return click(item);
+  };
+  const { runner } = harness(u);
+  const done = runner.start();
+  await tick();
+  verifies.resolve('a', 'ok');
+  await done;
+  await tick();
+  assert.deepEqual(u.calls, ['a']);
+  assert.equal(runner.state.removed, 1);
+  assert.equal(runner.state.error, null);
+});
+
+test('a new run resets slowdowns and finishedAt', async () => {
+  const u = fakeUnliker(['a'], { a: (n) => (n === 1 ? 'rate-limited' : 'ok') });
+  const { runner } = harness(u);
+  await runner.start();
+  assert.equal(runner.state.slowdowns, 1);
+  u.queue.push({ id: 'z', reverted: false });
+  const states = [];
+  runner.on((s) => states.push({ slowdowns: s.slowdowns, finishedAt: s.finishedAt }));
+  await runner.start();
+  assert.deepEqual(states[0], { slowdowns: 0, finishedAt: null });
 });
