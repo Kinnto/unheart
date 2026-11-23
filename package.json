@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "sim": "node tools/sim/run.mjs --posts 300"
   },
   "devDependencies": {
     "jsdom": "^31.0.1"
