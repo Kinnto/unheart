@@ -39,10 +39,13 @@ Remove your likes on X in bulk.
 Does not collect or use any user data. Does not sell or transfer data. Not used for creditworthiness or lending.
 
 ## Homepage URL
-https://<github-username>.github.io/unheart-site/
+https://kinnto.github.io/unheart-site/
 
 ## Privacy policy URL
-https://<github-username>.github.io/unheart-site/privacy.html
+https://kinnto.github.io/unheart-site/privacy.html
+
+## Contact email
+kicw118@gmail.com
 
 ## Screenshots (1280×800, to capture on the spare account)
 1. Ready panel on the Likes page ("Unlike all" / "or try 10 first")
