@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createPacer, onResult, nextWait, waited, START, FLOOR, CEILING, COURTESY_EVERY, COURTESY_PAUSE_MS, SHORT_BACKOFF_MS,
+  createPacer, onResult, nextWait, waited, backoffEnded, START, FLOOR, CEILING, COURTESY_EVERY, COURTESY_PAUSE_MS, SHORT_BACKOFF_MS,
 } from '../content/pacer.js';
 
 const MIN = 60_000;
@@ -11,10 +11,13 @@ const apply = (state, result, times, now = 0) => {
   return state;
 };
 
+// A rate limit at `now`, its back-off taken in full: returns the state after the
+// back-off, the wait, and the time the back-off ended.
 const limitAt = (s, now) => {
   s = onResult(s, 'rate-limited', now);
   const wait = nextWait(s, () => 0);
-  return { s: waited(s), wait };
+  const endedAt = now + wait.ms;
+  return { s: waited(s, endedAt), wait, endedAt };
 };
 
 test('starts in the 0.6–1.1 s start range and waits within it', () => {
@@ -55,25 +58,37 @@ test('a first rate limit takes a short 30 s back-off', () => {
   assert.deepEqual(wait, { ms: 30_000, kind: 'backoff' });
 });
 
-test('rate limits close together escalate 30 s, 2, 4, 8, 16, 30, 30 min; a lone one later is short again', () => {
+test('limits soon after a back-off ends escalate 30 s, 2, 4, 8, 16, 30, 30 min even with oks between', () => {
   let s = createPacer();
   const waits = [];
   let t = 0;
   for (let i = 0; i < 7; i++) {
     const r = limitAt(s, t);
-    s = r.s;
     waits.push(r.wait.ms);
-    t += 4 * MIN;
+    s = apply(r.s, 'ok', 50, r.endedAt + 30_000);
+    t = r.endedAt + 1 * MIN;
   }
   assert.deepEqual(waits, [30_000, 2 * MIN, 4 * MIN, 8 * MIN, 16 * MIN, 30 * MIN, 30 * MIN]);
-  const lastAt = t - 4 * MIN;
-  assert.equal(limitAt(s, lastAt + 6 * MIN).wait.ms, 30_000);
 });
 
-test('sequence: first limit 30 s, second within 5 min 2 min, third within 5 min 4 min, one 6 min later 30 s', () => {
+test('a limit more than 5 min after the last back-off ended is short again', () => {
+  let s = createPacer();
+  let r = limitAt(s, 0);
+  r = limitAt(apply(r.s, 'ok', 50), r.endedAt + 1 * MIN);
+  assert.equal(r.wait.ms, 2 * MIN);
+  r = limitAt(apply(r.s, 'ok', 50), r.endedAt + 4 * MIN);
+  assert.equal(r.wait.ms, 4 * MIN);
+  r = limitAt(apply(r.s, 'ok', 500), r.endedAt + 6 * MIN);
+  assert.equal(r.wait.ms, 30_000);
+  r = limitAt(apply(r.s, 'ok', 5), r.endedAt + 1 * MIN);
+  assert.equal(r.wait.ms, 2 * MIN, 'the ladder restarts from the bottom');
+});
+
+test('sequence: first limit 30 s, second within 5 min 2 min, third within 5 min 4 min, one 6 min after that back-off 30 s', () => {
   let s = createPacer();
   const seq = [];
-  for (const t of [0, 1 * MIN, 4 * MIN, 10 * MIN]) {
+  // Back-offs end at 0:30, 3:00 and 8:00; the last limit is 6 min after 8:00.
+  for (const t of [0, 1 * MIN, 4 * MIN, 14 * MIN]) {
     const r = limitAt(s, t);
     s = r.s;
     seq.push(r.wait.ms);
@@ -81,12 +96,30 @@ test('sequence: first limit 30 s, second within 5 min 2 min, third within 5 min 
   assert.deepEqual(seq, [30_000, 2 * MIN, 4 * MIN, 30_000]);
 });
 
-test('an ok between close limits resets the ladder level but a close limit is still long', () => {
-  let s = limitAt(createPacer(), 0).s;
-  s = limitAt(s, 1 * MIN).s;
-  s = onResult(s, 'ok', 2 * MIN);
-  assert.equal(s.backoffLevel, 0);
-  assert.equal(limitAt(s, 3 * MIN).wait.ms, 2 * MIN);
+test('closeness is measured from when the back-off ended, not when it started', () => {
+  let s = createPacer();
+  let r = limitAt(s, 0);
+  r = limitAt(r.s, r.endedAt + 1 * MIN);
+  r = limitAt(r.s, r.endedAt + 1 * MIN);
+  r = limitAt(r.s, r.endedAt + 1 * MIN);
+  assert.equal(r.wait.ms, 8 * MIN);
+  // Started more than 5 min before this limit, but ended only 1 min before it.
+  r = limitAt(r.s, r.endedAt + 1 * MIN);
+  assert.equal(r.wait.ms, 16 * MIN);
+});
+
+test('ok does not reset the back-off level', () => {
+  const r = limitAt(limitAt(createPacer(), 0).s, 31_000);
+  const s = apply(r.s, 'ok', 100);
+  assert.equal(s.backoffLevel, r.s.backoffLevel);
+  assert.equal(s.backoffLevel, 1);
+});
+
+test('waited() after a courtesy pause does not count as a back-off ending', () => {
+  let s = apply(createPacer(), 'ok', 500);
+  assert.equal(nextWait(s, () => 0).kind, 'courtesy');
+  s = waited(s, 1000);
+  assert.equal(limitAt(s, 2000).wait.ms, 30_000);
 });
 
 test('a rate limit halves the speed (doubles the range), at least the start range', () => {
@@ -118,4 +151,12 @@ test('takes a 30 s courtesy pause after every 500 ok, once', () => {
 
 test('rejects unknown results', () => {
   assert.throws(() => onResult(createPacer(), 'weird'), /Unknown result/);
+});
+
+test('backoffEnded only moves the back-off end later (a pause stretched it)', () => {
+  const r = limitAt(createPacer(), 0);
+  assert.equal(backoffEnded(r.s, 10_000).lastBackoffEndedAt, 30_000);
+  const stretched = backoffEnded(r.s, 8 * MIN);
+  assert.equal(stretched.lastBackoffEndedAt, 8 * MIN);
+  assert.equal(limitAt(stretched, 12 * MIN).wait.ms, 2 * MIN);
 });

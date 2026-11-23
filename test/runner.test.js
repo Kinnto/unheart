@@ -508,3 +508,69 @@ test('a new run resets slowdowns and finishedAt', async () => {
   await runner.start();
   assert.deepEqual(states[0], { slowdowns: 0, finishedAt: null });
 });
+
+test('repeated limits with oks in between climb the ladder: 30 s, 2 min, 4 min', async () => {
+  let aTries = 0;
+  const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+  const u = fakeUnliker(ids, { a: () => (++aTries <= 3 ? 'rate-limited' : 'ok') });
+  const { runner, clock } = harness(u, { neverWakeLongSleeps: true });
+  const done = runner.start();
+  const waits = [];
+  for (let i = 0; i < 3; i++) {
+    await tick();
+    assert.equal(runner.state.status, 'backing-off');
+    waits.push(runner.state.waitUntil - clock.t);
+    runner.resumeNow();
+  }
+  await done;
+  assert.deepEqual(waits, [30_000, 120_000, 240_000]);
+  assert.equal(runner.state.slowdowns, 3);
+  assert.equal(runner.state.removed, ids.length);
+});
+
+test('with a verification pending and no visible post, it drains before a scrolling next()', async () => {
+  const u = fakeUnliker([]);
+  const verifies = manualVerify(u, ['a']);
+  const log = [];
+  let served = false;
+  u.next = async ({ allowScroll } = {}) => {
+    log.push({ allowScroll, pending: verifies.pending().length });
+    if (!served) { served = true; return { id: 'a', reverted: false }; }
+    return allowScroll ? null : { needsScroll: true };
+  };
+  const { runner } = harness(u);
+  const done = runner.start();
+  await tick();
+  assert.deepEqual(log, [{ allowScroll: true, pending: 0 }, { allowScroll: false, pending: 1 }]);
+  assert.equal(runner.state.status, 'running');
+  verifies.resolve('a', 'ok');
+  await done;
+  assert.deepEqual(log[2], { allowScroll: true, pending: 0 });
+  assert.deepEqual(u.calls, ['a']);
+  assert.deepEqual(u.requeued, []);
+  assert.equal(runner.state.removed, 1);
+  assert.equal(runner.state.endReason, 'end');
+});
+
+test("a stopped run's late ok counts in the total but not toward the next run's limit", async () => {
+  const u = fakeUnliker(['a']);
+  const verifies = manualVerify(u, ['a', 'b', 'c']);
+  const { runner } = harness(u);
+  const first = runner.start();
+  await tick();
+  runner.stop();
+  u.queue.push(...['b', 'c', 'd'].map((id) => ({ id, reverted: false })));
+  const second = runner.start({ limit: 2 });
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c']);
+  verifies.resolve('a', 'ok');
+  await first;
+  verifies.resolve('b', 'failed');
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c', 'd'], 'the failure leaves room for one more');
+  verifies.resolve('c', 'ok');
+  await second;
+  assert.equal(runner.state.endReason, 'limit');
+  assert.equal(runner.state.removed, 3);
+  assert.equal(runner.state.removed - runner.state.removedAtStart, 2);
+});

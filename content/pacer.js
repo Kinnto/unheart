@@ -19,7 +19,7 @@ export function createPacer() {
     streak: 0,
     okTotal: 0,
     backoffLevel: 0,
-    lastLimitAt: null,
+    lastBackoffEndedAt: null,
     due: null,
     last: null,
   };
@@ -37,7 +37,6 @@ export function onResult(s, result, now) {
       last: 'ok',
       streak,
       okTotal,
-      backoffLevel: 0,
       due: okTotal % COURTESY_EVERY === 0 ? 'courtesy' : s.due,
       min: speedUp ? clamp(s.min * SPEED_UP, FLOOR.min, CEILING.min) : s.min,
       max: speedUp ? clamp(s.max * SPEED_UP, FLOOR.max, CEILING.max) : s.max,
@@ -53,12 +52,12 @@ export function onResult(s, result, now) {
     };
   }
   if (result === 'rate-limited') {
-    const close = s.lastLimitAt !== null && now - s.lastLimitAt <= CLOSE_LIMITS_MS;
+    // Close = X pushed back again soon after our previous back-off ended.
+    const close = s.lastBackoffEndedAt !== null && now - s.lastBackoffEndedAt <= CLOSE_LIMITS_MS;
     return {
       ...s,
       last: 'rate-limited',
       streak: 0,
-      lastLimitAt: now,
       backoffLevel: close ? s.backoffLevel + 1 : 0,
       due: 'backoff',
       min: clamp(s.min * 2, START.min, CEILING.min),
@@ -78,6 +77,15 @@ export function nextWait(s, random = Math.random) {
   return { ms: Math.round(s.min + random() * (s.max - s.min)), kind: 'pace' };
 }
 
-export function waited(s) {
-  return s.due === null ? s : { ...s, due: null };
+// Marks the due wait as taken. `endedAt` is when that wait ends; for a
+// back-off it is remembered to judge whether the next limit comes soon after.
+export function waited(s, endedAt) {
+  if (s.due === null) return s;
+  if (s.due === 'backoff') return { ...s, due: null, lastBackoffEndedAt: endedAt };
+  return { ...s, due: null };
+}
+
+// Records that a back-off really ended at `at`, if later than planned.
+export function backoffEnded(s, at) {
+  return s.lastBackoffEndedAt !== null && s.lastBackoffEndedAt >= at ? s : { ...s, lastBackoffEndedAt: at };
 }

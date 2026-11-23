@@ -49,7 +49,9 @@ export function createClickUnliker({
     return null;
   }
 
-  async function next() {
+  // With allowScroll false (verifications still pending), never scroll: a
+  // scroll can virtualise a post away mid-verification. Report needsScroll.
+  async function next({ allowScroll = true } = {}) {
     const seen = new Set();
     let lastGrowth = now();
     let brokenSince = null;
@@ -60,6 +62,7 @@ export function createClickUnliker({
         tried.add(item.id);
         return item;
       }
+      if (!allowScroll) return { needsScroll: true };
       const retry = sel.findTimelineRetry(doc);
       if (retry) {
         if (!retryReported) {
@@ -117,22 +120,26 @@ export function createClickUnliker({
     if (!record) return 'failed';
     clicked.delete(item.id);
     const { toastBefore, clickedAt: start } = record;
+    // 'ok' needs the heart seen un-liked continuously for STABLE_MS. A post we
+    // can't see is unknown: it breaks the streak, so it may end up 'failed'
+    // (an under-count) but never a false 'ok'.
     let flippedAt = null;
+    let sawFlip = false;
     while (now() - start < VERIFY_TOTAL_MS) {
       await sleep(VERIFY_STEP_MS);
       if (!toastBefore && sel.findErrorToast(doc)) return 'rate-limited';
       const liked = sel.findPost(item.id, doc)?.liked ?? null;
       if (liked === false) {
+        sawFlip = true;
         flippedAt ??= now();
         if (now() - flippedAt >= STABLE_MS) {
           succeeded.add(item.id);
           return 'ok';
         }
-      } else if (liked === true && flippedAt !== null) {
+      } else if (liked === true && sawFlip) {
         return 'rate-limited';
-      } else if (liked === null && flippedAt !== null) {
-        succeeded.add(item.id);
-        return 'ok';
+      } else if (liked === null) {
+        flippedAt = null;
       }
       if (flippedAt === null && now() - start >= FLIP_TIMEOUT_MS) return 'failed';
     }

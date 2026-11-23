@@ -1,4 +1,4 @@
-import { createPacer, onResult, nextWait, waited } from './pacer.js';
+import { createPacer, onResult, nextWait, waited, backoffEnded } from './pacer.js';
 
 const ACTIVE = new Set(['running', 'paused', 'backing-off']);
 export const MAX_IN_FLIGHT = 3;
@@ -56,7 +56,7 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
 
   function takeWait() {
     const wait = nextWait(pacer, random);
-    pacer = waited(pacer);
+    pacer = waited(pacer, now() + wait.ms);
     return wait;
   }
 
@@ -68,12 +68,17 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
     let limited = false;
     let failure = null;
     const live = () => id === runId && ACTIVE.has(state.status);
-    const requeue = (item) => { if (item && !item.giveUp && !item.loadLimited) unliker.requeue(item); };
+    const requeue = (item) => { if (item?.id && !item.giveUp) unliker.requeue(item); };
 
     // A settled verification always counts a real 'ok'; anything else only
     // matters while this run is still the live one.
     function settle(item, result) {
-      if (result === 'ok') set({ removed: state.removed + 1 });
+      if (result === 'ok' && id !== runId) {
+        // A newer run is going: keep the total honest without using its limit.
+        set({ removed: state.removed + 1, removedAtStart: state.removedAtStart + 1 });
+      } else if (result === 'ok') {
+        set({ removed: state.removed + 1 });
+      }
       if (result === 'rate-limited') unliker.requeue(item);
       if (!live()) return;
       if (result === 'rate-limited') {
@@ -103,7 +108,12 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
       pacer = onResult(pacer, 'rate-limited', now());
       set({ slowdowns: state.slowdowns + 1 });
       const wait = takeWait();
-      return waitFor(id, wait.ms, wait.kind);
+      try {
+        return await waitFor(id, wait.ms, wait.kind);
+      } finally {
+        // A pause can stretch the back-off past its planned end.
+        pacer = backoffEnded(pacer, now());
+      }
     }
 
     const atLimit = () => state.removed - state.removedAtStart + pending.size >= state.limit;
@@ -121,7 +131,7 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
           continue;
         }
         const pausesBefore = pauses;
-        const item = await unliker.next();
+        const item = await unliker.next({ allowScroll: pending.size === 0 });
         if (id !== runId) return requeue(item);
         if (item?.reverted) {
           set({ removed: state.removed - 1, failed: state.failed + (item.giveUp ? 1 : 0) });
@@ -133,6 +143,11 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
         }
         if (item?.loadLimited) {
           limited = true;
+          continue;
+        }
+        if (item?.needsScroll) {
+          // Let every pending verification finish before the page scrolls.
+          await drain();
           continue;
         }
         if (!item) {

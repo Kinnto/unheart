@@ -135,13 +135,50 @@ test('unlike rejects with CancelledError without clicking when shouldContinue is
   assert.equal(clicks, 0);
 });
 
-test('unlike counts a flipped heart whose post then leaves the DOM as ok', async () => {
+test('a flipped heart whose post leaves the DOM before 0.4 s of stable un-like is failed, not ok', async () => {
   let clickedAt = null;
   const { doc, unliker } = setup([{ id: '1' }], {
     hooks: [(t, d) => { if (clickedAt !== null && t - clickedAt >= 300) heart(d, '1')?.closest('article').remove(); }],
   });
   heart(doc, '1').addEventListener('click', (e) => { e.currentTarget.setAttribute('data-testid', 'like'); clickedAt = 0; });
+  assert.equal(await unliker.unlike(await unliker.next()), 'failed');
+  assert.deepEqual(unliker.succeededIds(), []);
+});
+
+test('a post that leaves the DOM resets stability; back and stable for 0.4 s is ok', async () => {
+  let clickedAt = null;
+  let article = null;
+  const { doc, unliker, clock } = setup([{ id: '1' }], {
+    hooks: [(t, d) => {
+      if (clickedAt === null) return;
+      if (t - clickedAt === 300) { article = heart(d, '1').closest('article'); article.remove(); }
+      if (t - clickedAt === 600) d.querySelector('main').append(article);
+    }],
+  });
+  heart(doc, '1').addEventListener('click', (e) => { e.currentTarget.setAttribute('data-testid', 'like'); clickedAt = clock.t; });
   assert.equal(await unliker.unlike(await unliker.next()), 'ok');
+  assert.ok(clock.t >= 1000, `ok only after 0.4 s stable since the post came back (t=${clock.t})`);
+});
+
+test('next({ allowScroll: false }) returns needsScroll instead of scrolling when no post is pickable', async () => {
+  const { unliker, calls, clock } = setup([{ id: '1', liked: false }]);
+  assert.deepEqual(await unliker.next({ allowScroll: false }), { needsScroll: true });
+  assert.equal(calls.scroll, 0);
+  assert.equal(clock.t, 0);
+});
+
+test('next({ allowScroll: false }) still returns a visible liked post', async () => {
+  const { unliker } = setup([{ id: '1' }]);
+  assert.deepEqual(await unliker.next({ allowScroll: false }), { id: '1', reverted: false });
+});
+
+test('next({ allowScroll: true }) scrolls to load more', async () => {
+  let added = false;
+  const { unliker, calls } = setup([], {
+    onScroll: (doc) => { if (!added) { addPost(doc, { id: '9' }); added = true; } },
+  });
+  assert.deepEqual(await unliker.next({ allowScroll: true }), { id: '9', reverted: false });
+  assert.equal(calls.scroll, 1);
 });
 
 test('next reports loadLimited on first sight of the timeline Retry button, without clicking', async () => {
