@@ -1,0 +1,163 @@
+import { getOwnHandle, isOwnLikesPage, LIKES_PATH } from './selectors.js';
+import { createClickUnliker } from './clickUnliker.js';
+import { createRunner } from './runner.js';
+import { createStore } from './store.js';
+import { view } from './view.js';
+import { createPanel, createPill } from './panel.js';
+
+const ACTIVE = new Set(['running', 'paused', 'backing-off']);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const store = createStore();
+
+let panel = null;
+let pill = null;
+let runner = null;
+let ticker = null;
+let ctx = { confirmed: false, confirming: null, resumable: null };
+let lastSaved = null;
+let lastKey = null;
+let syncing = false;
+
+function render() {
+  if (!panel || !runner) return;
+  panel.render(view(runner.state, { now: Date.now(), confirming: ctx.confirming, resumable: ctx.resumable }));
+}
+
+function persist(state) {
+  if (ACTIVE.has(state.status) && state.removed !== lastSaved) {
+    lastSaved = state.removed;
+    store.set({ progress: { removed: state.removed } });
+  } else if (state.status === 'done') {
+    lastSaved = null;
+    store.set({ progress: null });
+  }
+}
+
+function begin(limit, removed = runner.state.removed) {
+  ctx.resumable = null;
+  runner.start({ limit, removed });
+}
+
+function onAction(id) {
+  switch (id) {
+    case 'start-all':
+    case 'start-10': {
+      const limit = id === 'start-10' ? 10 : Infinity;
+      if (ctx.confirmed) begin(limit);
+      else ctx.confirming = limit;
+      break;
+    }
+    case 'confirm': {
+      const limit = ctx.confirming;
+      ctx.confirming = null;
+      ctx.confirmed = true;
+      store.set({ confirmed: true });
+      begin(limit);
+      break;
+    }
+    case 'cancel':
+      ctx.confirming = null;
+      break;
+    case 'resume-run':
+      begin(Infinity, ctx.resumable);
+      break;
+    case 'pause':
+      runner.pause('user');
+      break;
+    case 'resume':
+      runner.resume();
+      break;
+    case 'resume-now':
+      runner.resumeNow();
+      break;
+    case 'stop':
+      runner.stop();
+      lastSaved = null;
+      store.set({ progress: null });
+      break;
+    case 'retry':
+      runner.retry();
+      break;
+  }
+  render();
+}
+
+function mountPanel(saved, handle) {
+  const unliker = createClickUnliker({
+    sleep,
+    shouldContinue: () => runner === current && ACTIVE.has(current.state.status) && isOwnLikesPage(location.pathname, handle),
+  });
+  const current = createRunner({ unliker, sleep });
+  runner = current;
+  ctx = { confirmed: saved.confirmed, confirming: null, resumable: saved.progress?.removed ?? null };
+  panel = createPanel({ layout: saved.panel, onAction, onLayout: (layout) => store.set({ panel: layout }) });
+  runner.on((state) => {
+    persist(state);
+    render();
+  });
+  ticker = setInterval(render, 1000);
+  render();
+}
+
+function unmountPanel() {
+  if (!panel) return;
+  clearInterval(ticker);
+  panel.destroy();
+  panel = null;
+  const leaving = runner;
+  runner = null;
+  leaving.stop();
+}
+
+function mountPill() {
+  pill = createPill({
+    onOpen: () => location.assign(LIKES_PATH),
+    onDismiss: () => {
+      store.set({ pillDismissed: true });
+      removePill();
+    },
+  });
+}
+
+function removePill() {
+  pill?.destroy();
+  pill = null;
+}
+
+async function sync() {
+  if (!chrome.runtime?.id) {
+    clearInterval(poller);
+    unmountPanel();
+    removePill();
+    return;
+  }
+  if (syncing) return;
+  const handle = getOwnHandle();
+  const onLikes = isOwnLikesPage(location.pathname, handle);
+  const key = `${handle}|${location.pathname}`;
+  if ((!handle && !onLikes) || key === lastKey) return;
+  syncing = true;
+  try {
+    lastKey = key;
+    const saved = await store.get();
+    if (handle && saved.handle !== handle) store.set({ handle });
+    if (onLikes) {
+      removePill();
+      if (!panel) mountPanel(saved, handle);
+    } else {
+      unmountPanel();
+      if (handle && !pill && !saved.pillDismissed) mountPill();
+    }
+  } finally {
+    syncing = false;
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!runner) return;
+  if (document.hidden) runner.pause('hidden');
+  else if (runner.state.pauseReason === 'hidden') runner.resume();
+});
+
+const poller = setInterval(sync, 500);
+sync();

@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Unheart — Bulk Unlike for X",
+  "short_name": "Unheart",
+  "version": "0.1.0",
+  "description": "Remove your likes on X in bulk with one click. Turn your likes into ex-likes.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://x.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "Open your likes on X",
+    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "content_scripts": [
+    { "matches": ["https://x.com/*"], "js": ["content/loader.js"], "run_at": "document_idle" }
+  ],
+  "web_accessible_resources": [
+    { "resources": ["content/*.js"], "matches": ["https://x.com/*"], "use_dynamic_url": false }
+  ]
+}
