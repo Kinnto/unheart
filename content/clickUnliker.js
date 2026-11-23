@@ -111,12 +111,16 @@ export function createClickUnliker({
   // id -> { toastBefore, clickedAt }, recorded at click time so that each
   // in-flight verification judges error toasts against its own baseline.
   const clicked = new Map();
+  // One error toast is one rejection: the first verification to see a new
+  // toast claims it. The toast doesn't say which click X refused, so the
+  // other verifications that saw it are 'uncertain' (requeued, never 'ok').
+  const claimedToasts = new WeakSet();
 
   async function click(item) {
     const post = sel.findPost(item.id, doc);
     const button = post && sel.likedButtonOf(post.article);
     if (!button) return 'failed';
-    const toastBefore = sel.findErrorToast(doc);
+    const toastBefore = sel.errorToast(doc);
     button.scrollIntoView?.({ block: 'center' });
     if (!shouldContinue()) throw new CancelledError();
     button.click();
@@ -141,7 +145,12 @@ export function createClickUnliker({
     let sawFlip = false;
     while (now() - start < VERIFY_TOTAL_MS) {
       await sleep(VERIFY_STEP_MS);
-      if (!toastBefore && sel.findErrorToast(doc)) return 'rate-limited';
+      const toast = sel.errorToast(doc);
+      if (toast && toast !== toastBefore) {
+        if (claimedToasts.has(toast)) return 'uncertain';
+        claimedToasts.add(toast);
+        return 'rate-limited';
+      }
       const liked = sel.findPost(item.id, doc)?.liked ?? null;
       if (liked === false) {
         sawFlip = true;

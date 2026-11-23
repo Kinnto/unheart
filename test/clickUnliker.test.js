@@ -301,3 +301,29 @@ test('the default scroll brings the last loaded post into view', async () => {
   assert.deepEqual(await unliker.next(), { id: '3', reverted: false });
   assert.deepEqual(scrolled, [{ block: 'start' }]);
 });
+
+test('one error toast is one rejection; the other in-flight items are uncertain, never ok', async () => {
+  const { doc, unliker } = setup([{ id: '1' }, { id: '2' }, { id: '3' }]);
+  for (const id of ['1', '2', '3']) flipOnClick(doc, id);
+  const items = [await unliker.next(), await unliker.next(), await unliker.next()];
+  for (const item of items) await unliker.click(item);
+  heart(doc, '2').setAttribute('data-testid', 'unlike'); // X refused this one
+  showToast(doc, 'Something went wrong. Try reloading.');
+  const results = await Promise.all(items.map((item) => unliker.verify(item)));
+  assert.equal(results.filter((r) => r === 'rate-limited').length, 1, results.join());
+  assert.equal(results.filter((r) => r === 'uncertain').length, 2, results.join());
+  assert.deepEqual(unliker.succeededIds(), []);
+});
+
+test('a second, different error toast is a new rejection', async () => {
+  const { doc, unliker } = setup([{ id: '1' }, { id: '2' }]);
+  const first = await unliker.next();
+  await unliker.click(first);
+  const toast = showToast(doc, 'Something went wrong. Try reloading.');
+  assert.equal(await unliker.verify(first), 'rate-limited');
+  toast.remove();
+  const second = await unliker.next();
+  await unliker.click(second);
+  showToast(doc, 'Something went wrong. Try reloading.');
+  assert.equal(await unliker.verify(second), 'rate-limited');
+});

@@ -1,4 +1,4 @@
-import { createPacer, onResult, nextWait, waited, backoffEnded } from './pacer.js';
+import { createPacer, onClick, onResult, onLoadError, nextWait, waited, limitDue } from './pacer.js';
 
 const ACTIVE = new Set(['running', 'paused', 'backing-off']);
 export const MAX_IN_FLIGHT = 3;
@@ -56,7 +56,7 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
 
   function takeWait() {
     const wait = nextWait(pacer, random);
-    pacer = waited(pacer, now() + wait.ms);
+    pacer = waited(pacer);
     return wait;
   }
 
@@ -65,8 +65,8 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
   async function loop(id) {
     // Verifications started by this run that have not settled yet.
     const pending = new Set();
-    let limited = false;
     let failure = null;
+    const limited = () => limitDue(pacer);
     const live = () => id === runId && ACTIVE.has(state.status);
     const requeue = (item) => { if (item?.id && !item.giveUp) unliker.requeue(item); };
 
@@ -79,12 +79,9 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
       } else if (result === 'ok') {
         set({ removed: state.removed + 1 });
       }
-      if (result === 'rate-limited') unliker.requeue(item);
+      if (result === 'rate-limited' || result === 'uncertain') unliker.requeue(item);
       if (!live()) return;
-      if (result === 'rate-limited') {
-        limited = true;
-        return;
-      }
+      // The pacer decides whether a rejection is a glitch or a limit.
       pacer = onResult(pacer, result, now());
       if (result === 'failed') set({ failed: state.failed + 1 });
     }
@@ -104,16 +101,9 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
     async function backOff() {
       await drain();
       if (!(await checkpoint(id))) return false;
-      limited = false;
-      pacer = onResult(pacer, 'rate-limited', now());
       set({ slowdowns: state.slowdowns + 1 });
       const wait = takeWait();
-      try {
-        return await waitFor(id, wait.ms, wait.kind);
-      } finally {
-        // A pause can stretch the back-off past its planned end.
-        pacer = backoffEnded(pacer, now());
-      }
+      return waitFor(id, wait.ms, wait.kind);
     }
 
     const atLimit = () => state.removed - state.removedAtStart + pending.size >= state.limit;
@@ -121,7 +111,7 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
     try {
       while (await checkpoint(id)) {
         if (failure) throw failure;
-        if (limited) {
+        if (limited()) {
           if (!(await backOff())) return;
           continue;
         }
@@ -137,12 +127,14 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
           set({ removed: state.removed - 1, failed: state.failed + (item.giveUp ? 1 : 0) });
         }
         if (!(await checkpoint(id))) return requeue(item);
-        if (pauses !== pausesBefore || limited) {
+        if (pauses !== pausesBefore || limited()) {
           requeue(item);
           continue;
         }
         if (item?.loadLimited) {
-          limited = true;
+          // X's timeline failed to load: a rejection like any other. Once is
+          // a glitch (the next call clicks Retry); repeatedly is a limit.
+          pacer = onLoadError(pacer, now());
           continue;
         }
         if (item?.needsScroll) {
@@ -152,17 +144,19 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
         }
         if (!item) {
           await drain();
-          if (!limited && (await checkpoint(id))) return finish('end');
+          if (!limited() && (await checkpoint(id))) return finish('end');
           continue;
         }
         if (item.giveUp) continue;
         if ((await unliker.click(item)) === 'clicked') {
+          if (live()) pacer = onClick(pacer, now());
           track(item);
         } else if (live()) {
           pacer = onResult(pacer, 'failed', now());
           set({ failed: state.failed + 1 });
         }
         if (!live()) return;
+        if (limited()) continue;
         const wait = takeWait();
         if (!(await waitFor(id, wait.ms, wait.kind))) return;
       }

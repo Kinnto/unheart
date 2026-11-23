@@ -79,3 +79,13 @@ test('lastArticle returns the last loaded post article, or null', () => {
   const last = addPost(doc, { id: '3' });
   assert.equal(sel.lastArticle(doc), last);
 });
+
+test('errorToast returns the error toast element, or null for none or a non-error toast', () => {
+  const doc = makeDoc();
+  assert.equal(sel.errorToast(doc), null);
+  const info = showToast(doc, 'Your post was sent.');
+  assert.equal(sel.errorToast(doc), null);
+  info.remove();
+  const error = showToast(doc, 'Something went wrong. Try reloading.');
+  assert.equal(sel.errorToast(doc), error);
+});

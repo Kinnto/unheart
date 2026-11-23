@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createPacer, onResult, nextWait, waited, backoffEnded, START, FLOOR, CEILING, COURTESY_EVERY, COURTESY_PAUSE_MS, SHORT_BACKOFF_MS,
+  createPacer, onClick, onResult, onLimit, onLoadError, nextWait, waited, limitDue,
+  START, FLOOR, CEILING, COURTESY_EVERY, COURTESY_PAUSE_MS, BACKOFF_START_MS, BACKOFF_MAX_MS,
 } from '../content/pacer.js';
 
 const MIN = 60_000;
@@ -11,14 +12,19 @@ const apply = (state, result, times, now = 0) => {
   return state;
 };
 
-// A rate limit at `now`, its back-off taken in full: returns the state after the
-// back-off, the wait, and the time the back-off ended.
-const limitAt = (s, now) => {
-  s = onResult(s, 'rate-limited', now);
-  const wait = nextWait(s, () => 0);
-  const endedAt = now + wait.ms;
-  return { s: waited(s, endedAt), wait, endedAt };
+// Clicks every `every` ms from `from` to `to` (exclusive).
+const clicks = (s, from, to, every) => {
+  for (let t = from; t < to; t += every) s = onClick(s, t);
+  return s;
 };
+
+const backoff = (s) => {
+  const wait = nextWait(s, () => 0);
+  assert.equal(wait.kind, 'backoff');
+  return { s: waited(s), ms: wait.ms };
+};
+
+const mean = (s) => (s.min + s.max) / 2;
 
 test('starts in the 0.3–0.6 s start range and waits within it', () => {
   const s = createPacer();
@@ -28,7 +34,7 @@ test('starts in the 0.3–0.6 s start range and waits within it', () => {
   assert.equal(nextWait(s, () => 0).kind, 'pace');
 });
 
-test('speeds up by 10% after every 10 consecutive ok', () => {
+test('before any limit, speeds up by 10% after every 10 consecutive ok', () => {
   const s = apply(createPacer(), 'ok', 10);
   assert.equal(s.min, 270);
   assert.equal(s.max, 540);
@@ -52,94 +58,160 @@ test('failed widens the range by 30% and resets the streak, capped at the ceilin
   assert.equal(many.max, CEILING.max);
 });
 
-test('a first rate limit takes a short 30 s back-off', () => {
-  const { wait } = limitAt(createPacer(), 0);
-  assert.equal(SHORT_BACKOFF_MS, 30_000);
-  assert.deepEqual(wait, { ms: 30_000, kind: 'backoff' });
+test('an isolated rejection is soft: no back-off, pace widened ×1.5, streak reset', () => {
+  const s = onResult(apply(createPacer(), 'ok', 5), 'rate-limited', 0);
+  assert.equal(limitDue(s), false);
+  assert.equal(nextWait(s, () => 0).kind, 'pace');
+  assert.equal(s.min, 450);
+  assert.equal(s.max, 900);
+  assert.equal(s.streak, 0);
 });
 
-test('limits soon after a back-off ends escalate 30 s, 2, 4, 8, 16, 30, 30 min even with oks between', () => {
-  let s = createPacer();
-  const waits = [];
-  let t = 0;
-  for (let i = 0; i < 7; i++) {
-    const r = limitAt(s, t);
-    waits.push(r.wait.ms);
-    s = apply(r.s, 'ok', 50, r.endedAt + 30_000);
-    t = r.endedAt + 1 * MIN;
+test('a soft slowdown is temporary: 10 consecutive oks restore the pace from before the glitch', () => {
+  let s = apply(createPacer(), 'ok', 5);
+  const before = { min: s.min, max: s.max };
+  s = onResult(s, 'rate-limited', 0);
+  s = onResult(s, 'rate-limited', 0);
+  assert.equal(s.min, Math.round(before.min * 2.25));
+  s = apply(s, 'ok', 9);
+  assert.ok(s.min > before.min);
+  s = onResult(s, 'ok', 0);
+  assert.deepEqual({ min: s.min, max: s.max }, before);
+});
+
+test('isolated 3% rejections do not ratchet the pace up, even after a limit', () => {
+  for (const afterLimit of [false, true]) {
+    let s = createPacer();
+    if (afterLimit) s = waited(onLimit(s, 0));
+    const start = { min: s.min, max: s.max };
+    for (let i = 0; i < 330; i++) s = onResult(s, i % 33 === 32 ? 'rate-limited' : 'ok', 0);
+    s = apply(s, 'ok', 10);
+    assert.ok(s.max <= start.max, `afterLimit=${afterLimit}: ${s.min}-${s.max} vs ${start.min}-${start.max}`);
   }
-  assert.deepEqual(waits, [30_000, 2 * MIN, 4 * MIN, 8 * MIN, 16 * MIN, 30 * MIN, 30 * MIN]);
 });
 
-test('a limit more than 5 min after the last back-off ended is short again', () => {
-  let s = createPacer();
-  let r = limitAt(s, 0);
-  r = limitAt(apply(r.s, 'ok', 50), r.endedAt + 1 * MIN);
-  assert.equal(r.wait.ms, 2 * MIN);
-  r = limitAt(apply(r.s, 'ok', 50), r.endedAt + 4 * MIN);
-  assert.equal(r.wait.ms, 4 * MIN);
-  r = limitAt(apply(r.s, 'ok', 500), r.endedAt + 6 * MIN);
-  assert.equal(r.wait.ms, 30_000);
-  r = limitAt(apply(r.s, 'ok', 5), r.endedAt + 1 * MIN);
-  assert.equal(r.wait.ms, 2 * MIN, 'the ladder restarts from the bottom');
+test('a limit drops any pending soft-slowdown restore', () => {
+  let s = clicks(createPacer(), 0, 30_000, 1000);
+  s = onResult(s, 'rate-limited', 30_000);
+  s = backoff(onLimit(s, 30_000)).s;
+  const limited = { min: s.min, max: s.max };
+  s = apply(s, 'ok', 10);
+  assert.deepEqual({ min: s.min, max: s.max }, limited);
 });
 
-test('sequence: first limit 30 s, second within 5 min 2 min, third within 5 min 4 min, one 6 min after that back-off 30 s', () => {
+test('two rejections in the last 10 outcomes are soft; a third is a limit with a 60 s back-off', () => {
+  let s = apply(createPacer(), 'ok', 20);
+  s = onResult(s, 'rate-limited', 0);
+  s = apply(s, 'ok', 3);
+  s = onResult(s, 'rate-limited', 0);
+  s = apply(s, 'ok', 3);
+  assert.equal(limitDue(s), false);
+  s = onResult(s, 'rate-limited', 0);
+  assert.equal(limitDue(s), true);
+  assert.equal(BACKOFF_START_MS, 60_000);
+  assert.deepEqual(nextWait(s, () => 0), { ms: 60_000, kind: 'backoff' });
+});
+
+test('rejections more than 10 outcomes apart never add up to a limit', () => {
   let s = createPacer();
-  const seq = [];
-  // Back-offs end at 0:30, 3:00 and 8:00; the last limit is 6 min after 8:00.
-  for (const t of [0, 1 * MIN, 4 * MIN, 14 * MIN]) {
-    const r = limitAt(s, t);
-    s = r.s;
-    seq.push(r.wait.ms);
+  for (let i = 0; i < 20; i++) {
+    s = onResult(s, 'rate-limited', 0);
+    s = apply(s, 'ok', 9);
+    assert.equal(limitDue(s), false, `round ${i}`);
   }
-  assert.deepEqual(seq, [30_000, 2 * MIN, 4 * MIN, 30_000]);
 });
 
-test('closeness is measured from when the back-off ended, not when it started', () => {
-  let s = createPacer();
-  let r = limitAt(s, 0);
-  r = limitAt(r.s, r.endedAt + 1 * MIN);
-  r = limitAt(r.s, r.endedAt + 1 * MIN);
-  r = limitAt(r.s, r.endedAt + 1 * MIN);
-  assert.equal(r.wait.ms, 8 * MIN);
-  // Started more than 5 min before this limit, but ended only 1 min before it.
-  r = limitAt(r.s, r.endedAt + 1 * MIN);
-  assert.equal(r.wait.ms, 16 * MIN);
-});
-
-test('ok does not reset the back-off level', () => {
-  const r = limitAt(limitAt(createPacer(), 0).s, 31_000);
-  const s = apply(r.s, 'ok', 100);
-  assert.equal(s.backoffLevel, r.s.backoffLevel);
-  assert.equal(s.backoffLevel, 1);
-});
-
-test('waited() after a courtesy pause does not count as a back-off ending', () => {
-  let s = apply(createPacer(), 'ok', 500);
-  assert.equal(nextWait(s, () => 0).kind, 'courtesy');
-  s = waited(s, 1000);
-  assert.equal(limitAt(s, 2000).wait.ms, 30_000);
-});
-
-test('a rate limit halves the speed (doubles the range), at least the start range', () => {
-  const fast = apply(createPacer(), 'ok', 1000);
-  const slowed = onResult(fast, 'rate-limited', 0);
-  assert.equal(slowed.min, START.min);
-  assert.equal(slowed.max, START.max);
-  const twice = onResult(slowed, 'rate-limited', 1000);
-  assert.equal(twice.min, 600);
-  assert.equal(twice.max, 1200);
-  assert.equal(apply(createPacer(), 'rate-limited', 20, 0).max, CEILING.max);
-});
-
-test('the back-off wait is only returned once; after waited() pacing resumes', () => {
-  const s = onResult(createPacer(), 'rate-limited', 0);
-  assert.equal(nextWait(s, () => 0).kind, 'backoff');
+test('onLimit (timeline load error) forces a 60 s back-off', () => {
+  const s = onLimit(createPacer(), 0);
+  assert.equal(limitDue(s), true);
+  assert.deepEqual(nextWait(s, () => 0), { ms: 60_000, kind: 'backoff' });
+  assert.equal(limitDue(waited(s)), false);
   assert.equal(nextWait(waited(s), () => 0).kind, 'pace');
 });
 
-test('takes a 30 s courtesy pause after every 500 ok, once', () => {
+test('after a limit the pace is set to half the click rate seen in the last 30 s', () => {
+  let s = clicks(createPacer(), 0, 60_000, 400);
+  s = onLimit(s, 60_000);
+  assert.equal(mean(s), 800);
+  assert.ok(s.min < s.max);
+});
+
+test('the post-limit pace is never faster than the start range', () => {
+  let s = clicks(createPacer(), 0, 30_000, 100);
+  s = onLimit(s, 30_000);
+  assert.ok(s.min >= START.min && s.max >= START.max, `${s.min}-${s.max}`);
+});
+
+test('without recent clicks a limit keeps the pace but not faster than start', () => {
+  const fast = apply(createPacer(), 'ok', 1000);
+  const s = onLimit(fast, 0);
+  assert.equal(s.min, START.min);
+  assert.equal(s.max, START.max);
+});
+
+test('after a limit, speed-up is gentle: ×0.95 every 20 consecutive ok', () => {
+  let s = clicks(createPacer(), 0, 30_000, 500);
+  s = backoff(onLimit(s, 30_000)).s;
+  const before = { min: s.min, max: s.max };
+  s = apply(s, 'ok', 19);
+  assert.deepEqual({ min: s.min, max: s.max }, before);
+  s = onResult(s, 'ok', 0);
+  assert.equal(s.min, Math.round(before.min * 0.95));
+  assert.equal(s.max, Math.round(before.max * 0.95));
+  assert.equal(apply(s, 'ok', 10_000).min, FLOOR.min);
+});
+
+test('a rejected first verification after a back-off is a limit, and W doubles', () => {
+  let { s, ms } = backoff(onLimit(createPacer(), 0));
+  assert.equal(ms, 60_000);
+  s = onResult(s, 'rate-limited', 61_000);
+  assert.equal(limitDue(s), true);
+  ({ s, ms } = backoff(s));
+  assert.equal(ms, 120_000);
+});
+
+test('a rejection after the first verification post-back-off is soft again', () => {
+  let { s } = backoff(onLimit(createPacer(), 0));
+  s = onResult(s, 'ok', 0);
+  s = onResult(s, 'rate-limited', 0);
+  assert.equal(limitDue(s), false);
+});
+
+test('a limit before 10 oks since the last back-off doubles W, up to 15 min', () => {
+  let s = createPacer();
+  const waits = [];
+  for (let i = 0; i < 7; i++) {
+    const r = backoff(onLimit(s, 0));
+    waits.push(r.ms);
+    s = apply(r.s, 'ok', 5);
+  }
+  assert.equal(BACKOFF_MAX_MS, 15 * MIN);
+  assert.deepEqual(waits, [1, 2, 4, 8, 15, 15, 15].map((m) => m * MIN));
+});
+
+test('10 oks after a back-off reset W to 60 s', () => {
+  let s = backoff(onLimit(createPacer(), 0)).s;
+  s = backoff(onLimit(apply(s, 'ok', 3), 0)).s;
+  s = backoff(onLimit(apply(s, 'ok', 3), 0)).s; // W is now 4 min
+  s = apply(s, 'ok', 10);
+  assert.equal(backoff(onLimit(s, 0)).ms, 60_000);
+});
+
+test('results while a back-off is already due (the drain) do not escalate it', () => {
+  let s = onLimit(createPacer(), 0);
+  s = apply(s, 'rate-limited', 5);
+  assert.deepEqual(nextWait(s, () => 0), { ms: 60_000, kind: 'backoff' });
+});
+
+test('the back-off resets the rejection window', () => {
+  let s = apply(createPacer(), 'rate-limited', 3);
+  s = backoff(s).s;
+  s = onResult(s, 'ok', 0);
+  s = apply(s, 'rate-limited', 2);
+  assert.equal(limitDue(s), false);
+});
+
+test('takes a 30 s courtesy pause after every 500 ok, once, without hiding a due back-off', () => {
   assert.equal(COURTESY_EVERY, 500);
   assert.equal(COURTESY_PAUSE_MS, 30_000);
   assert.equal(nextWait(apply(createPacer(), 'ok', 499), () => 0).kind, 'pace');
@@ -147,16 +219,37 @@ test('takes a 30 s courtesy pause after every 500 ok, once', () => {
   assert.deepEqual(nextWait(s, () => 0), { ms: 30_000, kind: 'courtesy' });
   assert.equal(nextWait(waited(s), () => 0).kind, 'pace');
   assert.equal(nextWait(onResult(s, 'ok'), () => 0).kind, 'courtesy', 'a due courtesy pause survives a later ok');
+  const limited = onResult(onLimit(apply(createPacer(), 'ok', 499), 0), 'ok', 0);
+  assert.equal(nextWait(limited, () => 0).kind, 'backoff');
+});
+
+test("'uncertain' (a toast someone else claimed) changes nothing", () => {
+  const s = onResult(apply(createPacer(), 'rate-limited', 2), 'ok', 0);
+  assert.deepEqual(onResult(s, 'uncertain', 0), s);
+});
+
+test('a single timeline load error is a glitch; a second before any ok is a limit', () => {
+  let s = onLoadError(apply(createPacer(), 'ok', 5), 0);
+  assert.equal(limitDue(s), false);
+  assert.deepEqual({ min: s.min, max: s.max }, { min: START.min, max: START.max });
+  assert.equal(limitDue(onLoadError(s, 0)), true);
+  s = onResult(s, 'ok', 0);
+  assert.equal(limitDue(onLoadError(s, 0)), false, 'an ok in between makes it isolated again');
+});
+
+test('load errors stay out of the rejection window', () => {
+  let s = apply(createPacer(), 'rate-limited', 2);
+  s = onLoadError(s, 0);
+  assert.equal(limitDue(s), false);
+});
+
+test('a load error as the first event after a back-off is a limit, and W doubles', () => {
+  const { s } = backoff(onLimit(createPacer(), 0));
+  const again = onLoadError(s, 0);
+  assert.equal(limitDue(again), true);
+  assert.equal(nextWait(again, () => 0).ms, 120_000);
 });
 
 test('rejects unknown results', () => {
   assert.throws(() => onResult(createPacer(), 'weird'), /Unknown result/);
-});
-
-test('backoffEnded only moves the back-off end later (a pause stretched it)', () => {
-  const r = limitAt(createPacer(), 0);
-  assert.equal(backoffEnded(r.s, 10_000).lastBackoffEndedAt, 30_000);
-  const stretched = backoffEnded(r.s, 8 * MIN);
-  assert.equal(stretched.lastBackoffEndedAt, 8 * MIN);
-  assert.equal(limitAt(stretched, 12 * MIN).wait.ms, 2 * MIN);
 });

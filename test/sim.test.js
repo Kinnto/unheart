@@ -14,6 +14,8 @@ function assertHonest(r) {
   assert.equal(r.stats.relikes, 0, 'never re-likes a post');
 }
 
+const perMinute = (p) => p.actuallyUnliked / (p.simMs / 60_000);
+
 function assertTerminated(r) {
   for (const p of r.phases) assert.equal(p.drive, 'settled', `${r.scenario}/${p.name} did not terminate: ${p.drive}`);
   assert.deepEqual(r.problems, []);
@@ -47,11 +49,13 @@ test('sim default: everything unliked, counted exactly, nothing left', async () 
   assert.equal(r.phases[0].slowdowns, 0);
 });
 
-test('sim noisy: never over-counts and finishes the job', async () => {
+test('sim noisy: isolated glitches cost no back-off; fast, honest, finishes the job', async () => {
   const r = await simulate({ posts: POSTS, scenario: 'noisy', seed: 1 });
   assertTerminated(r);
   assertHonest(r);
   assert.equal(r.remaining, 0);
+  assert.equal(r.phases[0].slowdowns, 0);
+  assert.ok(perMinute(r.phases[0]) >= 120, `noisy ran at ${perMinute(r.phases[0]).toFixed(1)}/min`);
 });
 
 test('sim limited: backs off at least once and never over-counts', async () => {
@@ -60,6 +64,8 @@ test('sim limited: backs off at least once and never over-counts', async () => {
   assertHonest(r);
   assert.ok(r.phases[0].slowdowns >= 1);
   assert.ok(r.stats.rejectedLimit >= 1);
+  assert.equal(r.remaining, 0);
+  assert.ok(perMinute(r.phases[0]) >= 30, `limited ran at ${perMinute(r.phases[0]).toFixed(1)}/min`);
 });
 
 test('sim harsh: terminates and never over-counts', async () => {

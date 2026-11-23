@@ -52,9 +52,13 @@ export function likedButtonOf(article) {
   return article.querySelector(LIKED);
 }
 
+export function errorToast(doc = document) {
+  const toast = doc.querySelector(TOAST);
+  return toast && ERROR_TEXT.test(toast.textContent?.trim() ?? '') ? toast : null;
+}
+
 export function findErrorToast(doc = document) {
-  const text = doc.querySelector(TOAST)?.textContent?.trim() ?? '';
-  return ERROR_TEXT.test(text) ? text : null;
+  return errorToast(doc)?.textContent.trim() ?? null;
 }
 
 export function looksBroken(doc = document) {
