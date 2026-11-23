@@ -625,3 +625,21 @@ test("a stopped run's late ok counts in the total but not toward the next run's 
   assert.equal(runner.state.removed, 3);
   assert.equal(runner.state.removed - runner.state.removedAtStart, 2);
 });
+
+test('right after a back-off only the probe click is in flight until it settles', async () => {
+  const u = fakeUnliker([...LL3, 'a', 'b', 'c', 'd']);
+  const verifies = manualVerify(u, ['a', 'b', 'c', 'd']);
+  const { runner } = harness(u, { neverWakeLongSleeps: true });
+  const done = runner.start();
+  await tick();
+  assert.equal(runner.state.status, 'backing-off');
+  runner.resumeNow();
+  await tick();
+  assert.deepEqual(u.calls, ['a'], 'one probe click only');
+  verifies.resolve('a', 'ok');
+  await tick();
+  assert.deepEqual(u.calls, ['a', 'b', 'c', 'd'], 'pipelining resumes after the probe');
+  for (const id of ['b', 'c', 'd']) verifies.resolve(id, 'ok');
+  await done;
+  assert.equal(runner.state.removed, 4);
+});

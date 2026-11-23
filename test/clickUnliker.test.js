@@ -327,3 +327,47 @@ test('a second, different error toast is a new rejection', async () => {
   showToast(doc, 'Something went wrong. Try reloading.');
   assert.equal(await unliker.verify(second), 'rate-limited');
 });
+
+test('toast node reuse: an error re-shown on the same (hidden in between) node is a new rejection', async () => {
+  const { doc, unliker } = setup([{ id: '1' }, { id: '2' }]);
+  for (const id of ['1', '2']) flipOnClick(doc, id);
+  const first = await unliker.next();
+  await unliker.click(first);
+  const toast = showToast(doc, 'Something went wrong. Try reloading.');
+  assert.equal(await unliker.verify(first), 'rate-limited');
+  toast.hidden = true;
+  const second = await unliker.next();
+  await unliker.click(second);
+  toast.hidden = false;
+  assert.equal(await unliker.verify(second), 'rate-limited');
+});
+
+test('toast node reuse: new text on a toast that was already showing at click time is a new rejection', async () => {
+  const { doc, unliker } = setup([{ id: '1' }]);
+  flipOnClick(doc, '1');
+  const toast = showToast(doc, 'Something went wrong. Try reloading.');
+  const item = await unliker.next();
+  await unliker.click(item);
+  toast.textContent = 'Something went wrong, but don’t fret — let’s give it another shot.';
+  assert.equal(await unliker.verify(item), 'rate-limited');
+});
+
+test("an item's second 'uncertain' is treated as a rejection", async () => {
+  const { doc, unliker } = setup([{ id: '1' }, { id: '2' }]);
+  for (const id of ['1', '2']) flipOnClick(doc, id);
+  const verdicts = [];
+  for (let round = 0; round < 2; round++) {
+    const toast = doc.querySelector('[data-testid="toast"]');
+    toast?.remove();
+    const a = round === 0 ? await unliker.next() : { id: '1', reverted: false };
+    const b = round === 0 ? await unliker.next() : { id: '2', reverted: false };
+    heart(doc, '1').setAttribute('data-testid', 'unlike');
+    heart(doc, '2').setAttribute('data-testid', 'unlike');
+    await unliker.click(a);
+    await unliker.click(b);
+    showToast(doc, 'Something went wrong. Try reloading.');
+    verdicts.push(await Promise.all([unliker.verify(a), unliker.verify(b)]));
+  }
+  assert.deepEqual(verdicts[0], ['rate-limited', 'uncertain']);
+  assert.deepEqual(verdicts[1], ['rate-limited', 'rate-limited']);
+});

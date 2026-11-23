@@ -52,9 +52,15 @@ export function likedButtonOf(article) {
   return article.querySelector(LIKED);
 }
 
+const shown = (el) => !el.hidden && el.getAttribute('aria-hidden') !== 'true' && el.style?.display !== 'none';
+
+// The visible error toast, if any. X may keep one toast node and hide it
+// between messages, so a hidden node counts as no toast.
 export function errorToast(doc = document) {
-  const toast = doc.querySelector(TOAST);
-  return toast && ERROR_TEXT.test(toast.textContent?.trim() ?? '') ? toast : null;
+  for (const toast of doc.querySelectorAll(TOAST)) {
+    if (shown(toast) && ERROR_TEXT.test(toast.textContent?.trim() ?? '')) return toast;
+  }
+  return null;
 }
 
 export function findErrorToast(doc = document) {

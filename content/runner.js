@@ -116,7 +116,9 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
           continue;
         }
         if (atLimit() && !pending.size) return finish('limit');
-        if (atLimit() || pending.size >= MAX_IN_FLIGHT) {
+        // Right after a back-off, one probe click until X answers it.
+        const capacity = pacer.probing ? 1 : MAX_IN_FLIGHT;
+        if (atLimit() || pending.size >= capacity) {
           await Promise.race(pending);
           continue;
         }

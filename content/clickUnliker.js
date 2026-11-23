@@ -111,16 +111,36 @@ export function createClickUnliker({
   // id -> { toastBefore, clickedAt }, recorded at click time so that each
   // in-flight verification judges error toasts against its own baseline.
   const clicked = new Map();
-  // One error toast is one rejection: the first verification to see a new
-  // toast claims it. The toast doesn't say which click X refused, so the
-  // other verifications that saw it are 'uncertain' (requeued, never 'ok').
-  const claimedToasts = new WeakSet();
+  // Error toasts are tracked as episodes: a new episode starts whenever an
+  // error toast appears after none, or the toast node or its text changes
+  // (X may reuse one node). One episode is one rejection: the first
+  // verification to see it claims it. The toast doesn't say which click X
+  // refused, so the others that saw it are 'uncertain' (requeued, never
+  // 'ok') - but an item's second 'uncertain' counts as a rejection.
+  let episode = 0;
+  let seenToast = null;
+  const claimedEpisodes = new Set();
+  const uncertainCount = new Map();
+
+  function toastEpisode() {
+    const node = sel.errorToast(doc);
+    if (!node) {
+      seenToast = null;
+      return null;
+    }
+    const text = node.textContent.trim();
+    if (!seenToast || seenToast.node !== node || seenToast.text !== text) {
+      episode++;
+      seenToast = { node, text };
+    }
+    return episode;
+  }
 
   async function click(item) {
     const post = sel.findPost(item.id, doc);
     const button = post && sel.likedButtonOf(post.article);
     if (!button) return 'failed';
-    const toastBefore = sel.errorToast(doc);
+    const toastBefore = toastEpisode();
     button.scrollIntoView?.({ block: 'center' });
     if (!shouldContinue()) throw new CancelledError();
     button.click();
@@ -145,11 +165,15 @@ export function createClickUnliker({
     let sawFlip = false;
     while (now() - start < VERIFY_TOTAL_MS) {
       await sleep(VERIFY_STEP_MS);
-      const toast = sel.errorToast(doc);
-      if (toast && toast !== toastBefore) {
-        if (claimedToasts.has(toast)) return 'uncertain';
-        claimedToasts.add(toast);
-        return 'rate-limited';
+      const toast = toastEpisode();
+      if (toast !== null && toast !== toastBefore) {
+        if (!claimedEpisodes.has(toast)) {
+          claimedEpisodes.add(toast);
+          return 'rate-limited';
+        }
+        const times = (uncertainCount.get(item.id) ?? 0) + 1;
+        uncertainCount.set(item.id, times);
+        return times >= 2 ? 'rate-limited' : 'uncertain';
       }
       const liked = sel.findPost(item.id, doc)?.liked ?? null;
       if (liked === false) {

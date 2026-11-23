@@ -73,3 +73,11 @@ test('sim harsh: terminates and never over-counts', async () => {
   assertTerminated(r);
   assertHonest(r);
 });
+
+test('sim reuse: X reusing one toast node and leaving hearts grey still backs off, never over-counts', async () => {
+  const r = await simulate({ posts: POSTS, scenario: 'reuse', seed: 1 });
+  assertTerminated(r);
+  assertHonest(r);
+  assert.ok(r.phases[0].slowdowns >= 1);
+  assert.ok(r.stats.rejectedLimit <= 40, `X refused ${r.stats.rejectedLimit} clicks`);
+});

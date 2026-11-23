@@ -89,3 +89,18 @@ test('errorToast returns the error toast element, or null for none or a non-erro
   const error = showToast(doc, 'Something went wrong. Try reloading.');
   assert.equal(sel.errorToast(doc), error);
 });
+
+test('errorToast ignores a hidden toast node', () => {
+  const doc = makeDoc();
+  const toast = showToast(doc, 'Something went wrong. Try reloading.');
+  toast.hidden = true;
+  assert.equal(sel.errorToast(doc), null);
+  toast.hidden = false;
+  toast.setAttribute('aria-hidden', 'true');
+  assert.equal(sel.errorToast(doc), null);
+  toast.removeAttribute('aria-hidden');
+  toast.style.display = 'none';
+  assert.equal(sel.errorToast(doc), null);
+  toast.style.display = '';
+  assert.equal(sel.errorToast(doc), toast);
+});

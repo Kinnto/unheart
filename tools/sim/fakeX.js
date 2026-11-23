@@ -117,6 +117,8 @@ export const DEFAULTS = Object.freeze({
   revertRate: 0,
   toastRate: 0,
   loadErrorRate: 0,
+  reuseToastNode: false, // one persistent toast element, hidden/shown per error
+  toastRevertsHeart: true, // false: X refuses with a toast but leaves the heart grey
   limit: null, // { max, windowMs } sliding window of accepted unlikes
   burst: null, // { max, windowMs } short-term sliding window
 });
@@ -125,6 +127,16 @@ export const SCENARIOS = Object.freeze({
   default: {},
   noisy: { revertRate: 0.02, toastRate: 0.01, loadErrorRate: 0.02 },
   limited: { burst: { max: 50, windowMs: 60_000 }, limit: { max: 900, windowMs: 15 * 60_000 } },
+  // X reusing a single toast node (hidden between errors, text varying):
+  // a limit must still be detected and backed off.
+  reuse: {
+    reuseToastNode: true,
+    toastRevertsHeart: false,
+    toastRate: 0.02,
+    revertRate: 0.01,
+    burst: { max: 50, windowMs: 60_000 },
+    limit: { max: 900, windowMs: 15 * 60_000 },
+  },
   harsh: {
     revertRate: 0.05,
     toastRate: 0.03,
@@ -139,6 +151,7 @@ export const SCENARIOS = Object.freeze({
 export const hasHardLimits = (opts) => Boolean(opts.limit || opts.burst);
 
 export const TOAST_TEXT = 'Something went wrong. Try reloading.';
+export const TOAST_TEXTS = Object.freeze([TOAST_TEXT, 'Something went wrong, but don’t fret — let’s give it another shot.']);
 
 // A simulated Likes page. Server truth: `serverLiked`. Client: a cache of
 // fetched posts (with what each heart shows) and a rendered window of at most
@@ -199,7 +212,21 @@ export function createFakeX({ clock, random, ...options }) {
     c.button.setAttribute('data-testid', c.liked ? 'unlike' : 'like');
   }
 
+  let reusedToast = null;
+  let toastShows = 0;
+
   function showErrorToast() {
+    if (o.reuseToastNode) {
+      if (!reusedToast) {
+        reusedToast = showToast(doc, '');
+        reusedToast.hidden = true;
+      }
+      clock.cancel(toastTimer);
+      reusedToast.textContent = TOAST_TEXTS[toastShows++ % TOAST_TEXTS.length];
+      reusedToast.hidden = false;
+      toastTimer = clock.setTimer(o.toastMs, () => { reusedToast.hidden = true; });
+      return;
+    }
     if (toast) toast.remove();
     clock.cancel(toastTimer);
     toast = showToast(doc, TOAST_TEXT);
@@ -255,7 +282,7 @@ export function createFakeX({ clock, random, ...options }) {
       else if (outcome === 'toast') stats.rejectedToast++;
       else stats.rejectedRevert++;
       if (outcome !== 'revert') showErrorToast();
-      if (page === p && c.gen === gen) {
+      if (page === p && c.gen === gen && (outcome === 'revert' || o.toastRevertsHeart)) {
         c.liked = true;
         setHeart(c);
       }
