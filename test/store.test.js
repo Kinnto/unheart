@@ -18,3 +18,7 @@ test('get returns defaults merged with saved values', async () => {
   await store.set({ handle: 'alice', confirmed: true });
   assert.deepEqual(await store.get(), { ...DEFAULTS, handle: 'alice', confirmed: true });
 });
+
+test('reviewAsked defaults to false', () => {
+  assert.equal(DEFAULTS.reviewAsked, false);
+});

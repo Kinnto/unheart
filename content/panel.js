@@ -1,3 +1,5 @@
+import { createFeedbackForm } from './feedback.js';
+
 const STYLE = `
   :host { all: initial; }
   * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
@@ -28,6 +30,16 @@ const STYLE = `
   .pill button { border: 0; background: transparent; color: var(--fg); cursor: pointer; padding: 12px 16px; font-size: 17px; }
   .pill button:hover { background: var(--hover); }
   .pill .open { font-weight: 700; padding-left: 20px; }
+  .feedback-link { align-self: flex-start; border: 0; background: transparent; padding: 0; font-size: 13px; color: var(--muted); text-decoration: underline; cursor: pointer; }
+  .fb { display: flex; flex-direction: column; gap: 12px; }
+  .fb-title { font-weight: 700; font-size: 17px; }
+  .fb-choices { display: flex; gap: 8px; }
+  .fb-choice { flex: 1; padding: 10px 8px; font-size: 14px; }
+  .fb-choice.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--hover); }
+  .fb-text { width: 100%; resize: vertical; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; font-size: 15px; color: var(--fg); background: var(--bg); }
+  .fb-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .fb-status:empty { display: none; }
+  .btn:disabled { opacity: 0.5; cursor: default; }
   [hidden] { display: none !important; }
 `;
 
@@ -53,13 +65,14 @@ function mount(doc) {
   root.adoptedStyleSheets = [sheet];
   const wrap = el(doc, 'div', { class: theme(doc) });
   root.append(wrap);
+  for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, (event) => event.stopPropagation());
   doc.body.append(host);
   return { host, wrap };
 }
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), Math.max(min, max));
 
-export function createPanel({ doc = document, layout = {}, onAction, onLayout }) {
+export function createPanel({ doc = document, layout = {}, onAction, onLayout, onFeedbackSend }) {
   const { host, wrap } = mount(doc);
   const state = { x: layout.x ?? null, y: layout.y ?? null, minimized: Boolean(layout.minimized) };
 
@@ -69,8 +82,10 @@ export function createPanel({ doc = document, layout = {}, onAction, onLayout })
   header.append(el(doc, 'span', { class: 'title' }, 'Unheart'), minimize);
   const lines = el(doc, 'div', { class: 'lines', 'aria-live': 'polite' });
   const actions = el(doc, 'div', { class: 'actions' });
+  const feedbackLink = el(doc, 'button', { class: 'feedback-link', 'data-fb': 'open', type: 'button' }, 'Feedback');
+  feedbackLink.hidden = true;
   const body = el(doc, 'div', { class: 'body' });
-  body.append(lines, actions);
+  body.append(lines, actions, feedbackLink);
   panel.append(header, body);
   const badge = el(doc, 'button', { class: 'badge', 'aria-label': 'Expand Unheart' });
   wrap.append(panel, badge);
@@ -99,6 +114,24 @@ export function createPanel({ doc = document, layout = {}, onAction, onLayout })
   actions.addEventListener('click', (event) => {
     const id = event.target.closest('button')?.dataset.action;
     if (id) onAction(id);
+  });
+
+  let form = null;
+  let feedbackAllowed = false;
+  const showMain = (visible) => {
+    lines.hidden = !visible;
+    actions.hidden = !visible;
+    feedbackLink.hidden = !visible || !feedbackAllowed;
+  };
+  function closeFeedback() {
+    form?.destroy();
+    form = null;
+    showMain(true);
+  }
+  feedbackLink.addEventListener('click', () => {
+    form = createFeedbackForm({ doc, onSend: onFeedbackSend, onClose: closeFeedback });
+    body.append(form.el);
+    showMain(false);
   });
 
   let drag = null;
@@ -141,9 +174,12 @@ export function createPanel({ doc = document, layout = {}, onAction, onLayout })
           ...vm.actions.map((a) => el(doc, 'button', { class: `btn ${a.style}`, 'data-action': a.id }, a.label)),
         );
       }
+      feedbackAllowed = Boolean(vm.feedback && onFeedbackSend);
+      if (!form) feedbackLink.hidden = !feedbackAllowed;
       badge.textContent = vm.badge ? `♡ ${vm.badge}` : '♡';
     },
     destroy() {
+      form?.destroy();
       doc.defaultView.removeEventListener('resize', place);
       host.remove();
     },

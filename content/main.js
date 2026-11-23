@@ -4,6 +4,7 @@ import { createRunner } from './runner.js';
 import { createStore } from './store.js';
 import { view } from './view.js';
 import { createPanel, createPill } from './panel.js';
+import { STORE_URL, WEB3FORMS_KEY } from './config.js';
 
 const ACTIVE = new Set(['running', 'paused', 'backing-off']);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -13,7 +14,8 @@ let panel = null;
 let pill = null;
 let runner = null;
 let ticker = null;
-let ctx = { confirmed: false, confirming: null, resumable: null };
+let ctx = { confirmed: false, confirming: null, resumable: null, reviewAsked: false };
+const feedbackEnabled = Boolean(WEB3FORMS_KEY);
 let lastSaved = null;
 let lastSavedAt = 0;
 let saveTimer = null;
@@ -25,7 +27,7 @@ let syncing = false;
 
 function render() {
   if (!panel || !runner) return;
-  panel.render(view(runner.state, { now: Date.now(), confirming: ctx.confirming, resumable: ctx.resumable }));
+  panel.render(view(runner.state, { now: Date.now(), confirming: ctx.confirming, resumable: ctx.resumable, feedback: feedbackEnabled, reviewAsked: ctx.reviewAsked }));
 }
 
 function save(state) {
@@ -106,6 +108,11 @@ function onAction(id) {
     case 'retry':
       runner.retry();
       break;
+    case 'rate':
+      ctx.reviewAsked = true;
+      store.set({ reviewAsked: true });
+      window.open(`${STORE_URL}/reviews`, '_blank', 'noopener');
+      break;
     case 'share': {
       const text = `I just removed ${runner.state.removed.toLocaleString('en-US')} likes on X with Unheart 💔 https://kinnto.github.io/unheart-site/`;
       window.open(`https://x.com/intent/post?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
@@ -113,6 +120,15 @@ function onAction(id) {
     }
   }
   render();
+}
+
+async function sendFeedback({ choice, message }) {
+  try {
+    const reply = await chrome.runtime.sendMessage({ type: 'feedback', choice, message });
+    return reply?.ok === true;
+  } catch {
+    return false;
+  }
 }
 
 function mountPanel(saved, handle) {
@@ -123,8 +139,8 @@ function mountPanel(saved, handle) {
   });
   const current = createRunner({ unliker, sleep });
   runner = current;
-  ctx = { confirmed: saved.confirmed, confirming: null, resumable: saved.progress?.removed ?? null };
-  panel = createPanel({ layout: saved.panel, onAction, onLayout: (layout) => store.set({ panel: layout }) });
+  ctx = { confirmed: saved.confirmed, confirming: null, resumable: saved.progress?.removed ?? null, reviewAsked: saved.reviewAsked };
+  panel = createPanel({ layout: saved.panel, onAction, onLayout: (layout) => store.set({ panel: layout }), onFeedbackSend: sendFeedback });
   runner.on((state) => {
     persist(state);
     render();

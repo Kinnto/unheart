@@ -4,6 +4,7 @@ export const DEFAULTS = Object.freeze({
   panel: { x: null, y: null, minimized: false },
   pillDismissed: false,
   progress: null,
+  reviewAsked: false,
 });
 
 export function createStore(area = chrome.storage.local) {
