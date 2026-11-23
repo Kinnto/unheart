@@ -5,6 +5,7 @@ const FLIP_TIMEOUT_MS = 3000;
 const STABLE_MS = 400;
 const VERIFY_TOTAL_MS = 4000;
 const LOAD_WAIT_MS = 800;
+const LOAD_STEP_MS = 100;
 const GIVE_UP_MS = 10_000;
 
 export class SelectorsBrokenError extends Error {
@@ -23,7 +24,12 @@ export class CancelledError extends Error {
 
 export function createClickUnliker({
   doc = document,
-  scroll = () => window.scrollBy(0, window.innerHeight * 0.9),
+  // Bring the last loaded post to the top so X loads the next batch.
+  scroll = () => {
+    const last = sel.lastArticle(doc);
+    if (last) last.scrollIntoView({ block: 'start' });
+    else window.scrollBy(0, window.innerHeight * 0.9);
+  },
   scrollToTop = () => window.scrollTo(0, 0),
   sleep,
   now = Date.now,
@@ -51,6 +57,9 @@ export function createClickUnliker({
 
   // With allowScroll false (verifications still pending), never scroll: a
   // scroll can virtualise a post away mid-verification. Report needsScroll.
+  // Non-mutating check that pick() would return something.
+  const pickable = () => sel.listPosts(doc).some((post) => post.liked === true && (!tried.has(post.id) || succeeded.has(post.id)));
+
   async function next({ allowScroll = true } = {}) {
     const seen = new Set();
     let lastGrowth = now();
@@ -84,8 +93,13 @@ export function createClickUnliker({
       for (const post of sel.listPosts(doc)) seen.add(post.id);
       const before = seen.size;
       scroll();
-      await sleep(LOAD_WAIT_MS);
-      for (const post of sel.listPosts(doc)) seen.add(post.id);
+      // Poll for up to LOAD_WAIT_MS; carry on as soon as new posts show up.
+      const scrolledAt = now();
+      while (now() - scrolledAt < LOAD_WAIT_MS) {
+        await sleep(LOAD_STEP_MS);
+        for (const post of sel.listPosts(doc)) seen.add(post.id);
+        if (seen.size > before || pickable()) break;
+      }
       if (seen.size > before) lastGrowth = now();
       else if (now() - lastGrowth >= GIVE_UP_MS) {
         if (brokenSince !== null) throw new SelectorsBrokenError();

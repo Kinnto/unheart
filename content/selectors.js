@@ -39,6 +39,11 @@ export function listPosts(doc = document) {
     .filter((post) => post.id);
 }
 
+export function lastArticle(doc = document) {
+  const articles = doc.querySelectorAll(ARTICLE);
+  return articles.length ? articles[articles.length - 1] : null;
+}
+
 export function findPost(id, doc = document) {
   return listPosts(doc).find((post) => post.id === id) ?? null;
 }

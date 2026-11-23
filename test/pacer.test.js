@@ -20,18 +20,18 @@ const limitAt = (s, now) => {
   return { s: waited(s, endedAt), wait, endedAt };
 };
 
-test('starts in the 0.6–1.1 s start range and waits within it', () => {
+test('starts in the 0.3–0.6 s start range and waits within it', () => {
   const s = createPacer();
-  assert.deepEqual({ ...START }, { min: 600, max: 1100 });
-  assert.equal(nextWait(s, () => 0).ms, 600);
-  assert.equal(nextWait(s, () => 1).ms, 1100);
+  assert.deepEqual({ ...START }, { min: 300, max: 600 });
+  assert.equal(nextWait(s, () => 0).ms, 300);
+  assert.equal(nextWait(s, () => 1).ms, 600);
   assert.equal(nextWait(s, () => 0).kind, 'pace');
 });
 
 test('speeds up by 10% after every 10 consecutive ok', () => {
   const s = apply(createPacer(), 'ok', 10);
-  assert.equal(s.min, 540);
-  assert.equal(s.max, 990);
+  assert.equal(s.min, 270);
+  assert.equal(s.max, 540);
   assert.equal(apply(createPacer(), 'ok', 9).min, START.min);
 });
 
@@ -44,8 +44,8 @@ test('never goes below the 0.15–0.3 s floor', () => {
 
 test('failed widens the range by 30% and resets the streak, capped at the ceiling', () => {
   const once = onResult(apply(createPacer(), 'ok', 5), 'failed');
-  assert.equal(once.min, 780);
-  assert.equal(once.max, 1430);
+  assert.equal(once.min, 390);
+  assert.equal(once.max, 780);
   assert.equal(once.streak, 0);
   const many = apply(createPacer(), 'failed', 20);
   assert.equal(many.min, CEILING.min);
@@ -128,8 +128,8 @@ test('a rate limit halves the speed (doubles the range), at least the start rang
   assert.equal(slowed.min, START.min);
   assert.equal(slowed.max, START.max);
   const twice = onResult(slowed, 'rate-limited', 1000);
-  assert.equal(twice.min, 1200);
-  assert.equal(twice.max, 2200);
+  assert.equal(twice.min, 600);
+  assert.equal(twice.max, 1200);
   assert.equal(apply(createPacer(), 'rate-limited', 20, 0).max, CEILING.max);
 });
 

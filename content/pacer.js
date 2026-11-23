@@ -1,4 +1,4 @@
-export const START = Object.freeze({ min: 600, max: 1100 });
+export const START = Object.freeze({ min: 300, max: 600 });
 export const FLOOR = Object.freeze({ min: 150, max: 300 });
 export const CEILING = Object.freeze({ min: 4000, max: 8000 });
 export const SPEED_UP_EVERY = 10;

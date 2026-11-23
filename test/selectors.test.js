@@ -72,3 +72,10 @@ test('findTimelineRetry ignores other buttons and returns null when absent', () 
   doc.querySelector('main').append(other);
   assert.equal(sel.findTimelineRetry(doc), null);
 });
+
+test('lastArticle returns the last loaded post article, or null', () => {
+  assert.equal(sel.lastArticle(makeDoc()), null);
+  const doc = makeDoc({ posts: [{ id: '1' }, { id: '2' }] });
+  const last = addPost(doc, { id: '3' });
+  assert.equal(sel.lastArticle(doc), last);
+});

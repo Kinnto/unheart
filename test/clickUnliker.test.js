@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createClickUnliker, SelectorsBrokenError, CancelledError } from '../content/clickUnliker.js';
 import { makeDoc, addPost, heart, showToast, showTimelineRetry } from './helpers/xdom.js';
+import * as sel from '../content/selectors.js';
 
 function setup(posts, { onScroll = () => {}, hooks = [], shouldContinue } = {}) {
   const doc = makeDoc({ posts });
@@ -270,4 +271,33 @@ test('verify times its 3 s flip timeout from the click, not from the verify call
   clock.t += 3000;
   assert.equal(await unliker.verify(item), 'failed');
   assert.ok(clock.t <= 3200, `verify kept polling until ${clock.t}`);
+});
+
+test('next picks up posts as soon as they load after a scroll, not after a fixed 0.8 s', async () => {
+  let scrolledAt = null;
+  const { unliker, clock, calls } = setup([{ id: '1', liked: false }], {
+    onScroll: () => { scrolledAt = clock.t; },
+    hooks: [(t, d) => { if (scrolledAt !== null && t - scrolledAt === 200) addPost(d, { id: '2' }); }],
+  });
+  assert.deepEqual(await unliker.next(), { id: '2', reverted: false });
+  assert.equal(calls.scroll, 1);
+  assert.equal(clock.t, 200);
+});
+
+test('next still waits up to 0.8 s per scroll and gives up after 10 s without new posts', async () => {
+  const { unliker, clock, calls } = setup([{ id: '1', liked: false }]);
+  assert.equal(await unliker.next(), null);
+  assert.ok(clock.t >= 10_000 && clock.t <= 10_800, `gave up at ${clock.t}`);
+  assert.equal(calls.scroll, Math.ceil(10_000 / 800));
+});
+
+test('the default scroll brings the last loaded post into view', async () => {
+  const doc = makeDoc({ posts: [{ id: '1', liked: false }, { id: '2', liked: false }] });
+  const last = sel.lastArticle(doc);
+  const scrolled = [];
+  last.scrollIntoView = (opts) => { scrolled.push(opts); addPost(doc, { id: '3' }); };
+  const clock = { t: 0 };
+  const unliker = createClickUnliker({ doc, sleep: async (ms) => { clock.t += ms; }, now: () => clock.t });
+  assert.deepEqual(await unliker.next(), { id: '3', reverted: false });
+  assert.deepEqual(scrolled, [{ block: 'start' }]);
 });
