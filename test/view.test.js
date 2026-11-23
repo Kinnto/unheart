@@ -67,7 +67,7 @@ test('done states', () => {
   const one = view({ ...base, status: 'done', endReason: 'end', removed: 1 }, { now: 0 });
   assert.equal(texts(one)[0], 'Done — 1 like removed.');
   assert.match(texts(one)[1], /Reload the page/);
-  const withFailures = view({ ...base, status: 'done', endReason: 'end', removed: 1271, failed: 13 }, { now: 0 });
+  const withFailures = view({ ...base, status: 'done', endReason: 'end', removed: 1271, failed: 13 }, { now: 0, reviewAsked: true });
   assert.deepEqual(texts(withFailures).slice(0, 2), ['Done — 1,271 likes removed.', "13 didn't stick."]);
   assert.deepEqual(ids(withFailures), ['retry', 'share']);
   const limited = view({ ...base, status: 'done', endReason: 'limit', removed: 10 }, { now: 0 });
@@ -76,7 +76,7 @@ test('done states', () => {
 });
 
 test('done offers Share on X only from 10 removed, not when stopped or empty', () => {
-  const big = view({ ...base, status: 'done', endReason: 'end', removed: 1284 }, { now: 0 });
+  const big = view({ ...base, status: 'done', endReason: 'end', removed: 1284 }, { now: 0, reviewAsked: true });
   assert.deepEqual(ids(big), ['share']);
   assert.equal(big.actions[0].label, 'Share on X');
   assert.deepEqual(ids(view({ ...base, status: 'done', endReason: 'end', removed: 5 }, { now: 0 })), []);
@@ -94,4 +94,24 @@ test('error states', () => {
   assert.match(texts(broken)[0], /needs an update/);
   assert.deepEqual(ids(broken), []);
   assert.deepEqual(ids(view({ ...base, status: 'error', error: 'unexpected' }, { now: 0 })), ['retry']);
+});
+
+test('feedback flag is passed through to the view model', () => {
+  assert.equal(view(base, { now: 0 }).feedback, false);
+  assert.equal(view(base, { now: 0, feedback: true }).feedback, true);
+  assert.equal(view({ ...base, status: 'running' }, { now: 0, feedback: true }).feedback, true);
+});
+
+const done = (removed) => ({ ...base, status: 'done', removed, endReason: 'end' });
+
+test('done offers a one-time review request at 50+ removed', () => {
+  const vm = view(done(50), { now: 0 });
+  const rate = vm.actions.find((a) => a.id === 'rate');
+  assert.equal(rate.label, 'Rate Unheart ★');
+  assert.equal(rate.style, 'link');
+});
+
+test('no review request below 50 or once already asked', () => {
+  assert.equal(ids(view(done(49), { now: 0 })).includes('rate'), false);
+  assert.equal(ids(view(done(500), { now: 0, reviewAsked: true })).includes('rate'), false);
 });

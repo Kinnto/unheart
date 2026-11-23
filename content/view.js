@@ -14,7 +14,11 @@ function rate(state, now) {
   return minutes >= 0.5 && done > 0 ? `~${Math.round(done / minutes)} / min` : 'Starting…';
 }
 
-export function view(state, { now, confirming = null, resumable = null }) {
+export function view(state, { now, confirming = null, resumable = null, feedback = false, reviewAsked = false }) {
+  return { ...baseView(state, { now, confirming, resumable, reviewAsked }), feedback };
+}
+
+function baseView(state, { now, confirming, resumable, reviewAsked }) {
   const badge = fmt(state.removed);
   const count = line(`${fmt(state.removed)} unliked`, 'big');
   const pause = action('pause', 'Pause');
@@ -64,6 +68,7 @@ export function view(state, { now, confirming = null, resumable = null }) {
         lines.push(line('X may hide some older likes. Reload the page and run again to catch them.', 'muted'));
       }
       if (state.removed >= 10) actions.push(action('share', 'Share on X'));
+      if (state.removed >= 50 && !reviewAsked) actions.push(action('rate', 'Rate Unheart ★', 'link'));
       return { badge, lines, actions };
     }
 
