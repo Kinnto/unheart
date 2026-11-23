@@ -63,6 +63,7 @@ export function view(state, { now, confirming = null, resumable = null }) {
       } else {
         lines.push(line('X may hide some older likes. Reload the page and run again to catch them.', 'muted'));
       }
+      if (state.removed >= 10) actions.push(action('share', 'Share on X'));
       return { badge, lines, actions };
     }
 

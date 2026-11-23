@@ -244,3 +244,40 @@ test('an item fetched while stop lands is requeued', async () => {
   assert.deepEqual(u.requeued, ['a']);
   assert.deepEqual(u.calls, []);
 });
+
+test('loadLimited from next() backs off like a rate limit, then the run completes', async () => {
+  const u = fakeUnliker(['a', 'b']);
+  const items = [{ loadLimited: true }, { id: 'a', reverted: false }, { id: 'b', reverted: false }];
+  u.next = async () => items.shift() ?? null;
+  const { runner, clock, statuses } = harness(u);
+  await runner.start();
+  assert.ok(statuses.includes('backing-off'));
+  assert.ok(clock.t >= 120_000);
+  assert.deepEqual(u.calls, ['a', 'b']);
+  assert.equal(runner.state.removed, 2);
+  assert.equal(runner.state.status, 'done');
+});
+
+test('pacing memory survives stop and start: the second back-off is 4 minutes', async () => {
+  const u = fakeUnliker(['a'], { a: () => 'rate-limited' });
+  const { runner, clock } = harness(u, { neverWakeLongSleeps: true });
+  runner.start();
+  await tick();
+  assert.equal(runner.state.waitUntil - clock.t, 120_000);
+  runner.stop();
+  await tick();
+  runner.start();
+  await tick();
+  assert.equal(runner.state.status, 'backing-off');
+  assert.equal(runner.state.waitUntil - clock.t, 240_000);
+  runner.stop();
+});
+
+test('a loadLimited marker is never requeued when the run is stopped', async () => {
+  let runner;
+  const u = fakeUnliker([]);
+  u.next = async () => { runner.stop(); return { loadLimited: true }; };
+  ({ runner } = harness(u));
+  await runner.start();
+  assert.deepEqual(u.requeued, [undefined].slice(1));
+});

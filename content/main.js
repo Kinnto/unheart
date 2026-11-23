@@ -15,6 +15,8 @@ let runner = null;
 let ticker = null;
 let ctx = { confirmed: false, confirming: null, resumable: null };
 let lastSaved = null;
+const MAX_SAVED_IDS = 5000;
+let unliker = null;
 let lastKey = null;
 let syncing = false;
 
@@ -26,7 +28,7 @@ function render() {
 function persist(state) {
   if (ACTIVE.has(state.status) && state.removed !== lastSaved) {
     lastSaved = state.removed;
-    store.set({ progress: { removed: state.removed } });
+    store.set({ progress: { removed: state.removed, ids: unliker.succeededIds().slice(-MAX_SAVED_IDS) } });
   } else if (state.status === 'done') {
     lastSaved = null;
     store.set({ progress: null });
@@ -78,13 +80,19 @@ function onAction(id) {
     case 'retry':
       runner.retry();
       break;
+    case 'share': {
+      const text = `I just removed ${runner.state.removed.toLocaleString('en-US')} likes on X with Unheart 💔 https://kinnto.github.io/unheart-site/`;
+      window.open(`https://x.com/intent/post?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
+      break;
+    }
   }
   render();
 }
 
 function mountPanel(saved, handle) {
-  const unliker = createClickUnliker({
+  unliker = createClickUnliker({
     sleep,
+    initialSucceeded: saved.progress?.ids ?? [],
     shouldContinue: () => runner === current && ACTIVE.has(current.state.status) && isOwnLikesPage(location.pathname, handle),
   });
   const current = createRunner({ unliker, sleep });

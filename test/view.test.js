@@ -69,10 +69,18 @@ test('done states', () => {
   assert.match(texts(one)[1], /Reload the page/);
   const withFailures = view({ ...base, status: 'done', endReason: 'end', removed: 1271, failed: 13 }, { now: 0 });
   assert.deepEqual(texts(withFailures).slice(0, 2), ['Done — 1,271 likes removed.', "13 didn't stick."]);
-  assert.deepEqual(ids(withFailures), ['retry']);
+  assert.deepEqual(ids(withFailures), ['retry', 'share']);
   const limited = view({ ...base, status: 'done', endReason: 'limit', removed: 10 }, { now: 0 });
-  assert.deepEqual(ids(limited), ['start-all']);
+  assert.deepEqual(ids(limited), ['start-all', 'share']);
   assert.equal(limited.actions[0].label, 'Unlike the rest');
+});
+
+test('done offers Share on X only from 10 removed, not when stopped or empty', () => {
+  const big = view({ ...base, status: 'done', endReason: 'end', removed: 1284 }, { now: 0 });
+  assert.deepEqual(ids(big), ['share']);
+  assert.equal(big.actions[0].label, 'Share on X');
+  assert.deepEqual(ids(view({ ...base, status: 'done', endReason: 'end', removed: 5 }, { now: 0 })), []);
+  assert.deepEqual(ids(view({ ...base, status: 'stopped', removed: 50 }, { now: 0 })), ['start-all']);
 });
 
 test('stopped offers Continue', () => {

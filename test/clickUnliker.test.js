@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createClickUnliker, SelectorsBrokenError, CancelledError } from '../content/clickUnliker.js';
-import { makeDoc, addPost, heart, showToast } from './helpers/xdom.js';
+import { makeDoc, addPost, heart, showToast, showTimelineRetry } from './helpers/xdom.js';
 
 function setup(posts, { onScroll = () => {}, hooks = [], shouldContinue } = {}) {
   const doc = makeDoc({ posts });
@@ -142,4 +142,35 @@ test('unlike counts a flipped heart whose post then leaves the DOM as ok', async
   });
   heart(doc, '1').addEventListener('click', (e) => { e.currentTarget.setAttribute('data-testid', 'like'); clickedAt = 0; });
   assert.equal(await unliker.unlike(await unliker.next()), 'ok');
+});
+
+test('next reports loadLimited on first sight of the timeline Retry button, without clicking', async () => {
+  const { doc, unliker } = setup([{ id: '1', liked: false }]);
+  let clicks = 0;
+  showTimelineRetry(doc).addEventListener('click', () => { clicks++; });
+  assert.deepEqual(await unliker.next(), { loadLimited: true });
+  assert.equal(clicks, 0);
+});
+
+test('next clicks Retry when called again after a back-off, then returns new posts', async () => {
+  const { doc, unliker } = setup([{ id: '1', liked: false }]);
+  const retry = showTimelineRetry(doc);
+  const clicks = [];
+  retry.addEventListener('click', () => { clicks.push(1); addPost(doc, { id: '7' }); });
+  assert.deepEqual(await unliker.next(), { loadLimited: true });
+  assert.deepEqual(await unliker.next(), { id: '7', reverted: false });
+  assert.equal(clicks.length, 1);
+});
+
+test('seeded succeeded ids are treated as reverted when still liked', async () => {
+  const doc = makeDoc({ posts: [{ id: '1' }] });
+  const unliker = createClickUnliker({ doc, scroll() {}, sleep: async () => {}, now: () => 0, initialSucceeded: ['1'] });
+  assert.deepEqual(await unliker.next(), { id: '1', reverted: true });
+});
+
+test('succeededIds lists ids after successful unlikes', async () => {
+  const { doc, unliker } = setup([{ id: '1' }]);
+  flipOnClick(doc, '1');
+  assert.equal(await unliker.unlike(await unliker.next()), 'ok');
+  assert.deepEqual(unliker.succeededIds(), ['1']);
 });

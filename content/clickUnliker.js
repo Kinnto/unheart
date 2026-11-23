@@ -28,21 +28,23 @@ export function createClickUnliker({
   sleep,
   now = Date.now,
   shouldContinue = () => true,
+  initialSucceeded = [],
 }) {
   const tried = new Set();
-  const succeeded = new Set();
+  const succeeded = new Set(initialSucceeded);
+  let retryReported = false;
   const revertedOnce = new Set();
 
   function pick() {
     for (const post of sel.listPosts(doc)) {
       if (post.liked !== true) continue;
-      if (!tried.has(post.id)) return { id: post.id, reverted: false };
       if (succeeded.has(post.id)) {
         succeeded.delete(post.id);
         if (revertedOnce.has(post.id)) return { id: post.id, reverted: true, giveUp: true };
         revertedOnce.add(post.id);
         return { id: post.id, reverted: true };
       }
+      if (!tried.has(post.id)) return { id: post.id, reverted: false };
     }
     return null;
   }
@@ -57,6 +59,18 @@ export function createClickUnliker({
       if (item) {
         tried.add(item.id);
         return item;
+      }
+      const retry = sel.findTimelineRetry(doc);
+      if (retry) {
+        if (!retryReported) {
+          retryReported = true;
+          return { loadLimited: true };
+        }
+        retryReported = false;
+        retry.click();
+        lastGrowth = now();
+      } else {
+        retryReported = false;
       }
       if (sel.looksBroken(doc)) {
         brokenSince ??= now();
@@ -117,5 +131,7 @@ export function createClickUnliker({
     scrollToTop();
   }
 
-  return { next, unlike, requeue, restart };
+  const succeededIds = () => [...succeeded];
+
+  return { next, unlike, requeue, restart, succeededIds };
 }

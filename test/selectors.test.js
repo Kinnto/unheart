@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as sel from '../content/selectors.js';
-import { makeDoc, addPost, showToast } from './helpers/xdom.js';
+import { makeDoc, addPost, showToast, showTimelineRetry } from './helpers/xdom.js';
 
 test('getOwnHandle reads the sidebar profile link', () => {
   assert.equal(sel.getOwnHandle(makeDoc({ handle: 'alice_99' })), 'alice_99');
@@ -55,4 +55,20 @@ test('looksBroken when posts exist but no hearts are recognised', () => {
   assert.equal(sel.looksBroken(makeDoc({ posts: [{ id: '1' }] })), false);
   assert.equal(sel.looksBroken(makeDoc({ posts: [{ id: '1', liked: false }] })), false);
   assert.equal(sel.looksBroken(makeDoc({ posts: [{ id: '1', buttons: false }] })), true);
+});
+
+test('findTimelineRetry finds the Retry button inside main', () => {
+  const doc = makeDoc();
+  const button = showTimelineRetry(doc);
+  assert.equal(sel.findTimelineRetry(doc), button);
+});
+
+test('findTimelineRetry ignores other buttons and returns null when absent', () => {
+  const doc = makeDoc({ posts: [{ id: '1' }] });
+  assert.equal(sel.findTimelineRetry(doc), null);
+  const other = doc.createElement('div');
+  other.setAttribute('role', 'button');
+  other.textContent = 'Retry later';
+  doc.querySelector('main').append(other);
+  assert.equal(sel.findTimelineRetry(doc), null);
 });

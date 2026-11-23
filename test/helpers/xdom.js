@@ -36,3 +36,10 @@ export function showToast(doc, text) {
   doc.body.append(toast);
   return toast;
 }
+
+export function showTimelineRetry(doc) {
+  const box = doc.createElement('div');
+  box.innerHTML = '<span>Something went wrong. Try reloading.</span><div role="button"><span>Retry</span></div>';
+  doc.querySelector('main').append(box);
+  return box.querySelector('[role="button"]');
+}

@@ -56,3 +56,11 @@ export function looksBroken(doc = document) {
   if (doc.querySelectorAll(ARTICLE).length === 0) return false;
   return listPosts(doc).every((post) => post.liked === null);
 }
+
+export function findTimelineRetry(doc = document) {
+  const scope = doc.querySelector('main') ?? doc;
+  for (const el of scope.querySelectorAll('button, [role="button"]')) {
+    if (el.textContent.trim() === 'Retry') return el;
+  }
+  return null;
+}

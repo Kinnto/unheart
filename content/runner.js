@@ -61,18 +61,24 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
         const pausesBefore = pauses;
         const item = await unliker.next();
         if (id !== runId) {
-          if (item && !item.giveUp) unliker.requeue(item);
+          if (item && !item.giveUp && !item.loadLimited) unliker.requeue(item);
           return;
         }
         if (item?.reverted) {
           set({ removed: state.removed - 1, failed: state.failed + (item.giveUp ? 1 : 0) });
         }
         if (!(await checkpoint(id))) {
-          if (item && !item.giveUp) unliker.requeue(item);
+          if (item && !item.giveUp && !item.loadLimited) unliker.requeue(item);
           return;
         }
         if (pauses !== pausesBefore) {
-          if (item && !item.giveUp) unliker.requeue(item);
+          if (item && !item.giveUp && !item.loadLimited) unliker.requeue(item);
+          continue;
+        }
+        if (item?.loadLimited) {
+          pacer = onResult(pacer, 'rate-limited');
+          const wait = nextWait(pacer, random);
+          if (!(await waitFor(id, wait.ms, wait.kind))) return;
           continue;
         }
         if (!item) return finish('end');
@@ -105,7 +111,6 @@ export function createRunner({ unliker, sleep, now = Date.now, random = Math.ran
   function start({ limit = Infinity, removed = state.removed } = {}) {
     if (ACTIVE.has(state.status)) return Promise.resolve();
     const id = ++runId;
-    pacer = createPacer();
     set({
       status: 'running',
       limit,
